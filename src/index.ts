@@ -322,7 +322,46 @@ async function generateSQLQueryWithAI(
   - **Categorical data**: ORDER BY count DESC (หรือตาม value ที่เหมาะสม)
   - **Time series**: ORDER BY time_column ASC
   - **LIMIT**: ปรับตาม chart type และข้อมูล (10-50 รายการ)
+
+  ## STANDARDIZED AS ALIAS RULES (บังคับใช้):
+  ใช้เฉพาะ alias ที่อยู่ในรายการมาตรฐานเท่านั้น:
   
+  ### Aggregation Aliases:
+  - COUNT(*) AS count
+  - COUNT(column) AS count
+  - SUM(column) AS sum
+  - AVG(column) AS average
+  - MAX(column) AS maximum
+  - MIN(column) AS minimum
+  - COUNT(DISTINCT column) AS unique_count
+  
+  ### Frequency/Distribution Aliases:
+  - COUNT(*) AS frequency (สำหรับ histogram)
+  - COUNT(*) AS total (สำหรับ summary data)
+  
+  ### Percentage/Ratio Aliases:
+  - (COUNT(*) * 100.0 / total) AS percentage
+  - (value1 / value2) AS ratio
+  
+  ### Time-based Aliases:
+  - COUNT(*) AS count (สำหรับ time series)
+  - SUM(column) AS sum (สำหรับ time series totals)
+  
+  ### FORBIDDEN ALIASES - ห้ามใช้:
+  - medal_count (ใช้ count แทน)
+  - total_medals (ใช้ total แทน)
+  - num_records (ใช้ count แทน)
+  - value_sum (ใช้ sum แทน)
+  - medal_frequency (ใช้ frequency แทน)
+  - custom names อื่นๆ ที่ไม่ได้อยู่ในรายการมาตรฐาน
+  
+  ### Chart Type Specific Requirements:
+  - **Bar/Column Charts**: ใช้ count, sum, average, total
+  - **Pie/Donut Charts**: ใช้ count, percentage
+  - **Line/Area Charts**: ใช้ count, sum, average
+  - **Histogram**: ใช้ frequency
+  - **Scatter**: ไม่ต้องใช้ alias สำหรับ raw values
+
   ## ตัวอย่างการใช้ข้อมูลจริงในการสร้าง WHERE clause:
   ${Object.entries(sampleData.distinctValues)
     .map(([columnName, values]: [string, any]) => {
@@ -342,6 +381,11 @@ async function generateSQLQueryWithAI(
   2. สร้าง WHERE clause ที่ตรงกับความต้องการและใช้ค่าจริงจากตัวอย่างข้อมูล
   3. เลือก aggregation ที่เหมาะสมกับข้อมูล
   4. กำหนด ORDER BY และ LIMIT ที่เหมาะสม
+  5. **บังคับ**: ใช้เฉพาะ standardized aliases เท่านั้น ห้ามใช้ alias อื่น
+
+  ## ALIAS VALIDATION CHECKLIST:
+  ✅ ใช้ได้: count, sum, average, maximum, minimum, unique_count, frequency, total, percentage, ratio
+  ❌ ห้ามใช้: medal_count, total_medals, num_records, value_sum, medal_frequency หรือ alias ที่ไม่อยู่ในรายการมาตรฐาน
 
   ตอบกลับเป็น JSON object เท่านั้น:
   {
@@ -365,14 +409,20 @@ async function generateSQLQueryWithAI(
     const jsonMatch = contentString.match(/\{[\s\S]*\}/)
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0])
+      const sqlQuery = parsed.sql_query
+
+      // Validate SQL aliases
+      const aliasValidation = validateSQLAliases(sqlQuery)
+
       return {
-        sqlQuery: parsed.sql_query,
+        sqlQuery: sqlQuery,
         explanation: parsed.explanation,
         queryReasoning: parsed.query_reasoning || '',
         columnsUsed: parsed.columns_used || [],
         filtersApplied: parsed.filters_applied || [],
         chartSuitability: parsed.chart_suitability || '',
         sampleDataInsights: parsed.sample_data_insights || '',
+        aliasValidation: aliasValidation, // Add validation results
       }
     }
   } catch (error) {
@@ -383,20 +433,23 @@ async function generateSQLQueryWithAI(
   const fallbackColumns = columnAnalysis.required_columns || ['country', 'medal']
   const primaryColumn = fallbackColumns[0] || 'country'
 
+  const fallbackQuery = `
+    SELECT ${primaryColumn}, COUNT(*) as count
+    FROM ${tableName} 
+    GROUP BY ${primaryColumn}
+    ORDER BY count DESC
+    LIMIT 15
+  `.trim()
+
   return {
-    sqlQuery: `
-      SELECT ${primaryColumn}, COUNT(*) as count
-      FROM ${tableName} 
-      GROUP BY ${primaryColumn}
-      ORDER BY count DESC
-      LIMIT 15
-    `.trim(),
+    sqlQuery: fallbackQuery,
     explanation: `Fallback query: นับจำนวนรายการตาม ${primaryColumn} และเรียงลำดับจากมากไปน้อย`,
     queryReasoning: 'ใช้ fallback query เนื่องจาก AI generation ล้มเหลว',
     columnsUsed: [primaryColumn],
     filtersApplied: ['ไม่มี filter'],
     chartSuitability: `เหมาะสำหรับ ${columnAnalysis.chart_type} chart พื้นฐาน`,
     sampleDataInsights: 'ใช้ fallback query ไม่ได้วิเคราะห์จากตัวอย่างข้อมูล',
+    aliasValidation: validateSQLAliases(fallbackQuery), // Add validation for fallback too
   }
 }
 
@@ -406,27 +459,50 @@ function parseQueryResultToChartData(queryResult: any[], columnAnalysis: any) {
     return []
   }
 
+  // Standardized alias list for value detection
+  const STANDARD_VALUE_ALIASES = [
+    'count',
+    'sum',
+    'average',
+    'maximum',
+    'minimum',
+    'unique_count',
+    'frequency',
+    'total',
+    'percentage',
+    'ratio',
+  ]
+
   return queryResult.map((row, index) => {
     const keys = Object.keys(row)
 
-    // Improved value key detection
+    // Enhanced value key detection with standardized alias priority
     const valueKey =
+      // First priority: exact standardized alias matches
+      keys.find((key) => {
+        const exactKey = key.toLowerCase()
+        return STANDARD_VALUE_ALIASES.includes(exactKey)
+      }) ||
+      // Second priority: legacy compatibility (for existing queries)
+      keys.find((key) => {
+        const exactKey = key.toLowerCase()
+        return exactKey === 'medal_count' || exactKey === 'value' || exactKey === 'y'
+      }) ||
+      // Third priority: pattern-based detection (fallback)
       keys.find((key) => {
         const lowKey = key.toLowerCase()
         return (
           lowKey.includes('count') ||
-          lowKey.includes('value') ||
           lowKey.includes('total') ||
           lowKey.includes('sum') ||
-          lowKey.includes('amount') ||
-          lowKey.includes('number') ||
           lowKey.includes('frequency') ||
-          lowKey.includes('medal_count') ||
-          lowKey === 'y' ||
+          lowKey.includes('amount') ||
           // Check if the value is numeric
           (typeof row[key] === 'number' && !lowKey.includes('year') && !lowKey.includes('id'))
         )
-      }) || keys[keys.length - 1]
+      }) ||
+      // Fallback: last column (usually the aggregate column)
+      keys[keys.length - 1]
 
     // Handle multi-dimensional data
     const labelKeys = keys.filter((key) => key !== valueKey)
@@ -458,6 +534,71 @@ function parseQueryResultToChartData(queryResult: any[], columnAnalysis: any) {
       additional_info: row,
     }
   })
+}
+
+// Helper function to validate SQL aliases against standardized list
+function validateSQLAliases(sqlQuery: string): {
+  isValid: boolean
+  issues: string[]
+  suggestions: string[]
+} {
+  const STANDARD_ALIASES = [
+    'count',
+    'sum',
+    'average',
+    'maximum',
+    'minimum',
+    'unique_count',
+    'frequency',
+    'total',
+    'percentage',
+    'ratio',
+  ]
+
+  const FORBIDDEN_ALIASES = [
+    'medal_count',
+    'total_medals',
+    'num_records',
+    'value_sum',
+    'medal_frequency',
+    'count_medals',
+    'sum_medals',
+  ]
+
+  const issues: string[] = []
+  const suggestions: string[] = []
+
+  // Extract AS aliases from query
+  const asPattern = /\s+AS\s+(\w+)/gi
+  const matches = sqlQuery.matchAll(asPattern)
+
+  for (const match of matches) {
+    const alias = match[1].toLowerCase()
+
+    if (FORBIDDEN_ALIASES.includes(alias)) {
+      issues.push(`ห้ามใช้ alias "${alias}"`)
+
+      // Suggest standard alternatives
+      if (alias.includes('count')) {
+        suggestions.push(`ใช้ "count" แทน "${alias}"`)
+      } else if (alias.includes('sum')) {
+        suggestions.push(`ใช้ "sum" แทน "${alias}"`)
+      } else if (alias.includes('total')) {
+        suggestions.push(`ใช้ "total" แทน "${alias}"`)
+      } else if (alias.includes('frequency')) {
+        suggestions.push(`ใช้ "frequency" แทน "${alias}"`)
+      }
+    } else if (!STANDARD_ALIASES.includes(alias)) {
+      issues.push(`alias "${alias}" ไม่อยู่ในรายการมาตรฐาน`)
+      suggestions.push(`ใช้หนึ่งใน: ${STANDARD_ALIASES.join(', ')}`)
+    }
+  }
+
+  return {
+    isValid: issues.length === 0,
+    issues,
+    suggestions,
+  }
 }
 
 // Function to execute SQL query
