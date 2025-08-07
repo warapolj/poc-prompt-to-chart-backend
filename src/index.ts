@@ -104,10 +104,12 @@ app.get('/', (c: any) => {
         <div class="container">
             <h1>Server-Sent Events Test</h1>
             <textarea id="query" placeholder="ใส่คำถามของคุณที่นี่... เช่น:
-- แสดงจำนวนเหรียญทองของประเทศไทย
-- เปรียบเทียบเหรียญของประเทศต่างๆ ในปี 2024
-- แสดงการเปลี่ยนแปลงเหรียญทองของ USA ตลอดเวลา
-- แสดงกีฬาที่ไทยได้เหรียญมากที่สุด">แสดงจำนวนเหรียญทองของประเทศไทย</textarea><br>
+- แสดงจำนวนเหรียญทองของประเทศไทย (bar chart)
+- เปรียบเทียบเหรียญของประเทศต่างๆ ในปี 2024 (column chart)
+- แสดงการเปลี่ยนแปลงเหรียญทองของ USA ตลอดเวลา (line chart)
+- แสดงสัดส่วนเหรียญทอง เงิน ทองแดงของไทย (pie chart)
+- แสดงการกระจายของอายุนักกีฬา (histogram)
+- แสดงกีฬาที่ไทยได้เหรียญมากที่สุด (bar chart)">แสดงจำนวนเหรียญทองของประเทศไทย</textarea><br>
             <button id="sendBtn" onclick="sendQuery()">ส่งคำถาม (AI Analysis)</button>
             <button id="testBtn" onclick="testStream()">ทดสอบ SSE</button>
             <button id="columnsBtn" onclick="loadColumns()">ดู Columns</button>
@@ -205,7 +207,19 @@ app.get('/', (c: any) => {
                         if (data.column_analysis) {
                             addMessage('📊 การวิเคราะห์: ' + data.column_analysis.analysis, 'result');
                             addMessage('🔍 Columns ที่ใช้: ' + data.column_analysis.required_columns.join(', '), 'result');
-                            addMessage('📈 ประเภทกราฟ: ' + data.column_analysis.chart_type, 'result');
+                            addMessage('📈 ประเภทกราฟหลัก: ' + data.column_analysis.chart_type, 'result');
+                            if (data.column_analysis.alternative_charts && data.column_analysis.alternative_charts.length > 0) {
+                                addMessage('📊 กราฟทางเลือก: ' + data.column_analysis.alternative_charts.join(', '), 'result');
+                            }
+                            if (data.column_analysis.chart_reasoning) {
+                                addMessage('💡 เหตุผล: ' + data.column_analysis.chart_reasoning, 'result');
+                            }
+                            if (data.column_analysis.x_axis && data.column_analysis.y_axis) {
+                                addMessage('📐 แกน X: ' + data.column_analysis.x_axis + ', แกน Y: ' + data.column_analysis.y_axis, 'result');
+                            }
+                            if (data.column_analysis.data_aggregation) {
+                                addMessage('🧮 การรวมข้อมูล: ' + data.column_analysis.data_aggregation, 'result');
+                            }
                         }
                         if (data.result.metadata && data.result.metadata.database_info) {
                             addMessage('🗄️ Database: เชื่อมต่อสำเร็จ, มี ' + data.result.metadata.database_info.total_columns + ' columns', 'result');
@@ -445,18 +459,33 @@ app.post('/api/query-stream', async (c: any) => {
         .join('\n      ')
 
       const columnAnalysisPrompt = `
-      วิเคราะห์คำถามต่อไปนี้และระบุว่าต้องใช้ column ไหนจากข้อมูล Olympic:
+      วิเคราะห์คำถามต่อไปนี้และระบุว่าต้องใช้ column ไหนจากข้อมูล Olympic และเลือก chart type ที่เหมาะสมที่สุด:
       
       คำถาม: "${userQuery}"
       
       Columns ที่มีในข้อมูล:
       ${columnsDescription}
       
-      ตอบกลับเป็น JSON object เท่านั้น:
+      ประเภท Chart ที่สามารถใช้ได้:
+      1. bar - เหมาะสำหรับเปรียบเทียบค่าต่างๆ (เช่น จำนวนเหรียญของแต่ละประเทศ)
+      2. line - เหมาะสำหรับแสดงการเปลี่ยนแปลงตามเวลา (เช่น เหรียญตลอดหลายปี)  
+      3. pie - เหมาะสำหรับแสดงสัดส่วน (เช่น สัดส่วนเหรียญทอง เงิน ทองแดง)
+      4. scatter - เหมาะสำหรับแสดงความสัมพันธ์ระหว่าง 2 ตัวแปร
+      5. histogram - เหมาะสำหรับแสดงการกระจายของข้อมูล
+      6. area - เหมาะสำหรับแสดงการเปลี่ยนแปลงตามเวลาแบบสะสม
+      7. donut - เหมาะสำหรับแสดงสัดส่วนแบบมีพื้นที่กลาง
+      8. column - เหมาะสำหรับเปรียบเทียบค่าต่างๆ แนวตั้ง
+      
+      วิเคราะห์และตอบกลับเป็น JSON object เท่านั้น:
       {
         "required_columns": ["column1", "column2"],
-        "chart_type": "bar|line|pie|scatter",
-        "analysis": "คำอธิบายสั้นๆ ว่าทำไมเลือก columns เหล่านี้"
+        "chart_type": "ประเภทกราฟที่เหมาะสมที่สุด",
+        "alternative_charts": ["chart_type2", "chart_type3"],
+        "analysis": "คำอธิบายว่าทำไมเลือก columns และ chart type นี้",
+        "chart_reasoning": "เหตุผลที่เลือก chart type นี้และทำไมถึงเหมาะสมกับข้อมูล",
+        "data_aggregation": "วิธีการรวมข้อมูล เช่น count, sum, average, group by",
+        "x_axis": "ข้อมูลที่ควรแสดงในแกน X",
+        "y_axis": "ข้อมูลที่ควรแสดงในแกน Y"
       }
       `
 
@@ -498,14 +527,21 @@ app.post('/api/query-stream', async (c: any) => {
         columnAnalysis = {
           required_columns: ['country', 'medal'],
           chart_type: 'bar',
+          alternative_charts: ['column', 'pie'],
           analysis: 'ไม่สามารถวิเคราะห์ได้ ใช้ค่าเริ่มต้น',
+          chart_reasoning: 'ใช้กราฟแท่งเปรียบเทียบข้อมูลพื้นฐาน',
+          data_aggregation: 'count',
+          x_axis: 'country',
+          y_axis: 'medal_count',
         }
       }
 
       await stream.writeSSE({
         data: JSON.stringify({
           type: 'status',
-          message: `ผลการวิเคราะห์: ใช้ columns ${columnAnalysis.required_columns.join(', ')}`,
+          message: `ผลการวิเคราะห์: ใช้ ${
+            columnAnalysis.chart_type
+          } chart กับ columns ${columnAnalysis.required_columns.join(', ')}`,
           progress: 75,
         }),
         event: 'update',
@@ -534,11 +570,17 @@ app.post('/api/query-stream', async (c: any) => {
         ],
         metadata: {
           columns_used: columnAnalysis.required_columns,
-          aggregation_method: 'count',
+          aggregation_method: columnAnalysis.data_aggregation || 'count',
           filters_applied: [],
           total_records: 3,
           data_range: 'mock data based on analysis',
           analysis: columnAnalysis.analysis,
+          chart_reasoning: columnAnalysis.chart_reasoning,
+          alternative_charts: columnAnalysis.alternative_charts || [],
+          axis_info: {
+            x_axis: columnAnalysis.x_axis,
+            y_axis: columnAnalysis.y_axis,
+          },
           available_columns: availableColumns.map((col) => ({
             name: col.name,
             type: col.type,
