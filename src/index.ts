@@ -6,9 +6,7 @@ import { CSVLoader } from '@langchain/community/document_loaders/fs/csv'
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter'
 import { MemoryVectorStore } from 'langchain/vectorstores/memory'
 import { RetrievalQAChain } from 'langchain/chains'
-
-// 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
-const GEMINI_API_KEY = 'AIzaSyBx1aswV7w6-0pROZ5IWYLlHcSSYYbjEbw'
+import 'dotenv/config'
 
 const app = new Hono()
 
@@ -22,7 +20,7 @@ app.post('/api/query', async (c) => {
 
   const model = new ChatGoogleGenerativeAI({
     model: 'gemini-2.5-pro',
-    apiKey: GEMINI_API_KEY,
+    apiKey: process.env.GEMINI_API_KEY,
     temperature: 0.3,
   })
 
@@ -39,7 +37,7 @@ app.post('/api/query', async (c) => {
     splitDocs,
     new GoogleGenerativeAIEmbeddings({
       modelName: 'models/embedding-001',
-      apiKey: GEMINI_API_KEY,
+      apiKey: process.env.GEMINI_API_KEY,
     }),
   )
   const retriever = vectorStore.asRetriever({
