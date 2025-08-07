@@ -140,8 +140,11 @@ async function getSampleData(tableName: string, availableColumns: any[], limit: 
   try {
     connection = await mysql.createConnection(dbConfig)
 
-    // Get sample records
-    const [sampleRows] = await connection.execute(`SELECT * FROM ${tableName} LIMIT ?`, [limit])
+    // Ensure limit is a safe integer to prevent SQL injection
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit))) // Clamp between 1 and 100
+
+    // Get sample records - use string interpolation for LIMIT as MySQL doesn't support parameter placeholders for LIMIT
+    const [sampleRows] = await connection.execute(`SELECT * FROM ${tableName} LIMIT ${safeLimit}`)
 
     // Dynamically get distinct values for categorical columns
     const distinctValues: any = {}
@@ -413,6 +416,248 @@ async function executeQuery(sqlQuery: string, params: any[] = []) {
     }
   }
 }
+
+// Function to verify query results with AI analysis
+async function verifyQueryResultsWithAI(
+  originalPrompt: string,
+  sqlQuery: string,
+  queryResults: any[],
+  columnAnalysis: any,
+  availableColumns: any[],
+  tableName: string,
+) {
+  const verificationModel = new ChatGoogleGenerativeAI({
+    model: 'gemini-1.5-flash',
+    apiKey: process.env.GEMINI_API_KEY,
+    temperature: 0.1,
+  })
+
+  const verificationPrompt = `
+  ตรวจสอบความถูกต้องของผลลัพธ์ SQL Query ต่อไปนี้:
+
+  คำถามต้นฉบับของผู้ใช้: "${originalPrompt}"
+  
+  SQL Query ที่สร้าง: 
+  ${sqlQuery}
+  
+  ผลลัพธ์ที่ได้ (${queryResults.length} รายการ):
+  ${queryResults
+    .slice(0, 10)
+    .map(
+      (row, index) =>
+        `${index + 1}. ${Object.entries(row)
+          .map(([key, value]) => `${key}: ${value}`)
+          .join(', ')}`,
+    )
+    .join('\n')}
+  ${queryResults.length > 10 ? `... และอีก ${queryResults.length - 10} รายการ` : ''}
+
+  การวิเคราะห์เดิม:
+  - Chart type: ${columnAnalysis.chart_type}
+  - Columns ที่ใช้: ${columnAnalysis.required_columns?.join(', ')}
+  - X axis: ${columnAnalysis.x_axis}
+  - Y axis: ${columnAnalysis.y_axis}
+
+  Columns ที่มีในตาราง ${tableName}:
+  ${availableColumns
+    .map((col) => `- ${col.name} (${col.type}): ${col.comment || 'ไม่มีคำอธิบาย'}`)
+    .join('\n')}
+
+  วิเคราะห์และตรวจสอบ:
+  1. ผลลัพธ์ตรงกับคำถามของผู้ใช้หรือไม่?
+  2. SQL Query เหมาะสมและถูกต้องหรือไม่?
+  3. ข้อมูลที่ได้มีความหมายและใช้งานได้หรือไม่?
+  4. จำนวนผลลัพธ์เหมาะสมหรือไม่ (ไม่น้อยเกินไป ไม่มากเกินไป)?
+  5. Chart type ที่เลือกเหมาะสมกับข้อมูลหรือไม่?
+
+  ตอบกลับเป็น JSON object เท่านั้น:
+  {
+    "is_valid": true/false,
+    "confidence_score": 0-100,
+    "issues_found": ["รายการปัญหาที่พบ"],
+    "suggestions": ["คำแนะนำในการปรับปรุง"],
+    "should_retry": true/false,
+    "improved_sql": "SQL query ที่ปรับปรุงแล้ว (ถ้ามี)",
+    "reasoning": "เหตุผลในการตัดสินใจ",
+    "data_quality": {
+      "completeness": "การประเมินความครบถ้วน",
+      "relevance": "การประเมินความเกี่ยวข้อง",
+      "accuracy": "การประเมินความถูกต้อง"
+    }
+  }
+  `
+
+  try {
+    const verificationResult = await verificationModel.invoke(verificationPrompt)
+
+    // แปลง content เป็น string และหา JSON
+    const contentString =
+      typeof verificationResult.content === 'string'
+        ? verificationResult.content
+        : JSON.stringify(verificationResult.content)
+
+    const jsonMatch = contentString.match(/\{[\s\S]*\}/)
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0])
+      return {
+        isValid: parsed.is_valid || false,
+        confidenceScore: parsed.confidence_score || 0,
+        issuesFound: parsed.issues_found || [],
+        suggestions: parsed.suggestions || [],
+        shouldRetry: parsed.should_retry || false,
+        improvedSql: parsed.improved_sql || null,
+        reasoning: parsed.reasoning || '',
+        dataQuality: parsed.data_quality || {
+          completeness: 'ไม่ทราบ',
+          relevance: 'ไม่ทราบ',
+          accuracy: 'ไม่ทราบ',
+        },
+      }
+    }
+  } catch (error) {
+    console.error('Error in AI verification:', error)
+  }
+
+  // Fallback verification - basic checks
+  return {
+    isValid: queryResults.length > 0,
+    confidenceScore: queryResults.length > 0 ? 70 : 30,
+    issuesFound: queryResults.length === 0 ? ['ไม่พบข้อมูล'] : [],
+    suggestions: queryResults.length === 0 ? ['ลองปรับเงื่อนไข WHERE หรือเปลี่ยน table'] : [],
+    shouldRetry: queryResults.length === 0,
+    improvedSql: null,
+    reasoning: 'การตรวจสอบพื้นฐาน - AI verification ล้มเหลว',
+    dataQuality: {
+      completeness: queryResults.length > 0 ? 'ดี' : 'ต่ำ',
+      relevance: 'ไม่ทราบ',
+      accuracy: 'ไม่ทราบ',
+    },
+  }
+}
+
+// Function to execute query with AI verification and retry logic
+async function executeQueryWithRetry(
+  originalPrompt: string,
+  columnAnalysis: any,
+  availableColumns: any[],
+  sampleData: any,
+  tableName: string,
+  maxRetries: number = 2,
+) {
+  let attempt = 0
+  let lastResult = null
+  let lastError = null
+  let currentSqlData = null
+
+  while (attempt <= maxRetries) {
+    try {
+      // Generate SQL query
+      if (attempt === 0) {
+        // First attempt - use original analysis
+        currentSqlData = await generateSQLQueryWithAI(
+          columnAnalysis,
+          originalPrompt,
+          availableColumns,
+          sampleData,
+          tableName,
+        )
+      } else {
+        // Retry attempt - include feedback from previous verification
+        const retryPrompt = `
+        ${originalPrompt}
+        
+        RETRY ${attempt}/${maxRetries}:
+        ปัญหาจากครั้งก่อน: ${
+          lastResult?.verification?.issuesFound?.join(', ') || 'ผลลัพธ์ไม่เหมาะสม'
+        }
+        คำแนะนำ: ${lastResult?.verification?.suggestions?.join(', ') || 'ไม่มี'}
+        ${
+          lastResult?.verification?.improvedSql
+            ? `SQL ที่แนะนำ: ${lastResult.verification.improvedSql}`
+            : ''
+        }
+        `
+
+        currentSqlData = await generateSQLQueryWithAI(
+          columnAnalysis,
+          retryPrompt,
+          availableColumns,
+          sampleData,
+          tableName,
+        )
+      }
+
+      // Execute the SQL query
+      const queryResults = await executeQuery(currentSqlData.sqlQuery)
+
+      // Verify results with AI
+      const verification = await verifyQueryResultsWithAI(
+        originalPrompt,
+        currentSqlData.sqlQuery,
+        queryResults,
+        columnAnalysis,
+        availableColumns,
+        tableName,
+      )
+
+      const result = {
+        success: true,
+        queryResults,
+        sqlData: currentSqlData,
+        verification,
+        attempt: attempt + 1,
+        maxRetries,
+      }
+
+      // Check if result is acceptable
+      if (verification.isValid && verification.confidenceScore >= 70) {
+        return result
+      }
+
+      // If not valid and we should retry
+      if (verification.shouldRetry && attempt < maxRetries) {
+        lastResult = result
+        attempt++
+        continue
+      }
+
+      // Return current result even if not perfect
+      return result
+    } catch (error) {
+      lastError = error
+      console.error(`Query execution attempt ${attempt + 1} failed:`, error)
+
+      if (attempt < maxRetries) {
+        attempt++
+        continue
+      }
+
+      // All attempts failed, return error result
+      return {
+        success: false,
+        queryResults: [],
+        sqlData: currentSqlData || {
+          sqlQuery: 'SELECT "Error" as message',
+          explanation: 'เกิดข้อผิดพลาดในการสร้าง SQL',
+        },
+        verification: {
+          isValid: false,
+          confidenceScore: 0,
+          issuesFound: [
+            `เกิดข้อผิดพลาด: ${lastError instanceof Error ? lastError.message : 'Unknown error'}`,
+          ],
+          suggestions: ['ลองเปลี่ยนคำถามหรือตรวจสอบข้อมูล'],
+          shouldRetry: false,
+          reasoning: 'เกิดข้อผิดพลาดในการ execute query หลายครั้ง',
+        },
+        attempt: attempt + 1,
+        maxRetries,
+        error: lastError,
+      }
+    }
+  }
+}
+
 // Helper function to analyze table structure dynamically
 async function analyzeTableStructure(tableName: string) {
   let connection
@@ -975,38 +1220,67 @@ app.post('/api/query-stream', async (c: any) => {
         event: 'update',
       })
 
-      // Execute query และรับข้อมูลจริง
       await stream.writeSSE({
         data: JSON.stringify({
           type: 'status',
-          message: 'กำลังดึงข้อมูลจากฐานข้อมูล...',
+          message: 'กำลัง execute query พร้อมตรวจสอบผลลัพธ์ด้วย AI...',
           progress: 85,
         }),
         event: 'update',
       })
 
+      // Execute query with AI verification and retry logic
+      const queryExecutionResult = await executeQueryWithRetry(
+        userQuery,
+        columnAnalysis,
+        availableColumns,
+        sampleData,
+        tableName,
+        2, // max 2 retries
+      )
+
       let queryResult = []
       let executionError = null
+      let verificationInfo = null
 
-      try {
-        queryResult = await executeQuery(sqlQuery)
+      if (queryExecutionResult && queryExecutionResult.success) {
+        queryResult = queryExecutionResult.queryResults
+        verificationInfo = queryExecutionResult.verification
 
         await stream.writeSSE({
           data: JSON.stringify({
             type: 'status',
-            message: `Query สำเร็จ! พบข้อมูล ${queryResult.length} รายการ`,
+            message: `Query สำเร็จ! พบข้อมูล ${queryResult.length} รายการ (ความเชื่อมั่น: ${verificationInfo.confidenceScore}%)`,
             progress: 90,
           }),
           event: 'update',
         })
-      } catch (error) {
-        executionError = error
-        console.error('Query execution failed:', error)
+
+        // Show retry info if applicable
+        if (queryExecutionResult.attempt > 1) {
+          await stream.writeSSE({
+            data: JSON.stringify({
+              type: 'status',
+              message: `ใช้ความพยายามครั้งที่ ${queryExecutionResult.attempt}/${queryExecutionResult.maxRetries} จึงได้ผลลัพธ์ที่เหมาะสม`,
+              progress: 92,
+            }),
+            event: 'update',
+          })
+        }
+      } else {
+        // Handle error case
+        const errorResult = queryExecutionResult as any // Type assertion for error case
+        executionError = errorResult?.error || new Error('Unknown execution error')
+        verificationInfo = errorResult?.verification
+
+        console.error('Query execution failed after retries:', executionError)
 
         await stream.writeSSE({
           data: JSON.stringify({
             type: 'status',
-            message: 'Query ไม่สำเร็จ ใช้ข้อมูลจำลองแทน...',
+            message: `Query ไม่สำเร็จหลังจากลองแล้ว ${
+              errorResult?.attempt || 0
+            } ครั้ง - ใช้ข้อมูลจำลองแทน`,
             progress: 90,
           }),
           event: 'update',
@@ -1049,14 +1323,24 @@ app.post('/api/query-stream', async (c: any) => {
       })
 
       // Format data สำหรับ shadcn charts
+      // Get SQL info from result (either from retry or original)
+      const sqlInfo = queryExecutionResult?.sqlData || result
+      const actualSqlQuery = sqlInfo.sqlQuery
+      const actualExplanation = sqlInfo.explanation
+      const actualQueryReasoning = (sqlInfo as any).queryReasoning || queryReasoning || ''
+      const actualColumnsUsed = (sqlInfo as any).columnsUsed || columnsUsed || []
+      const actualFiltersApplied = (sqlInfo as any).filtersApplied || filtersApplied || []
+      const actualChartSuitability = (sqlInfo as any).chartSuitability || chartSuitability || ''
+
       const shadcnChartData = generateShadcnChartResponse(
         columnAnalysis.chart_type as ChartType,
         chartData,
         `ผลลัพธ์สำหรับ: ${userQuery}`,
         {
-          columns_used: columnsUsed.length > 0 ? columnsUsed : columnAnalysis.required_columns,
+          columns_used:
+            actualColumnsUsed.length > 0 ? actualColumnsUsed : columnAnalysis.required_columns,
           aggregation_method: columnAnalysis.data_aggregation || 'count',
-          filters_applied: filtersApplied.length > 0 ? filtersApplied : [],
+          filters_applied: actualFiltersApplied.length > 0 ? actualFiltersApplied : [],
           total_records: chartData.length,
           data_range: executionError ? 'mock data (query failed)' : 'real data from database',
           analysis: columnAnalysis.analysis,
@@ -1066,10 +1350,10 @@ app.post('/api/query-stream', async (c: any) => {
             x_axis: columnAnalysis.x_axis,
             y_axis: columnAnalysis.y_axis,
           },
-          sql_query: sqlQuery,
-          sql_explanation: explanation,
-          sql_reasoning: queryReasoning,
-          chart_suitability: chartSuitability,
+          sql_query: actualSqlQuery,
+          sql_explanation: actualExplanation,
+          sql_reasoning: actualQueryReasoning,
+          chart_suitability: actualChartSuitability,
           query_execution: {
             success: !executionError,
             error: executionError
@@ -1079,6 +1363,24 @@ app.post('/api/query-stream', async (c: any) => {
               : null,
             rows_returned: queryResult.length,
           },
+          // Add AI verification info
+          ai_verification: verificationInfo
+            ? {
+                is_valid: verificationInfo.isValid,
+                confidence_score: verificationInfo.confidenceScore,
+                issues_found: verificationInfo.issuesFound,
+                suggestions: verificationInfo.suggestions,
+                data_quality: verificationInfo.dataQuality,
+                reasoning: verificationInfo.reasoning,
+              }
+            : null,
+          retry_info: queryExecutionResult
+            ? {
+                attempts_made: queryExecutionResult.attempt,
+                max_retries: queryExecutionResult.maxRetries,
+                final_success: queryExecutionResult.success,
+              }
+            : null,
           available_columns: availableColumns.map((col) => ({
             name: col.name,
             type: col.type,
