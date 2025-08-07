@@ -162,7 +162,7 @@ async function getSampleData(tableName, availableColumns, limit = 10) {
 // Function to generate SQL query using AI with dynamic rules
 async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumns, sampleData, tableName = 'olympic_medalists') {
     const analysisModel = new ChatGoogleGenerativeAI({
-        model: 'gemini-1.5-flash',
+        model: 'gemini-2.5-flash',
         apiKey: process.env.GEMINI_API_KEY,
         temperature: 0.1,
     });
@@ -334,6 +334,58 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
         sampleDataInsights: 'ใช้ fallback query ไม่ได้วิเคราะห์จากตัวอย่างข้อมูล',
     };
 }
+// Helper function to better handle data parsing and transformation
+function parseQueryResultToChartData(queryResult, columnAnalysis) {
+    if (!queryResult || queryResult.length === 0) {
+        return [];
+    }
+    return queryResult.map((row, index) => {
+        const keys = Object.keys(row);
+        // Improved value key detection
+        const valueKey = keys.find((key) => {
+            const lowKey = key.toLowerCase();
+            return lowKey.includes('count') ||
+                lowKey.includes('value') ||
+                lowKey.includes('total') ||
+                lowKey.includes('sum') ||
+                lowKey.includes('amount') ||
+                lowKey.includes('number') ||
+                lowKey.includes('frequency') ||
+                lowKey.includes('medal_count') ||
+                lowKey === 'y' ||
+                // Check if the value is numeric
+                (typeof row[key] === 'number' && !lowKey.includes('year') && !lowKey.includes('id'));
+        }) || keys[keys.length - 1];
+        // Handle multi-dimensional data
+        const labelKeys = keys.filter(key => key !== valueKey);
+        let labelValue = '';
+        if (labelKeys.length === 1) {
+            labelValue = row[labelKeys[0]]?.toString() || 'Unknown';
+        }
+        else if (labelKeys.length > 1) {
+            // For multi-dimensional data like year + medal, create meaningful labels
+            labelValue = labelKeys.map(key => row[key]?.toString() || '').join(' - ');
+        }
+        else {
+            labelValue = `Item ${index + 1}`;
+        }
+        // Enhanced value parsing
+        let parsedValue = 0;
+        const rawValue = row[valueKey];
+        if (typeof rawValue === 'number') {
+            parsedValue = rawValue;
+        }
+        else if (typeof rawValue === 'string') {
+            const numValue = parseFloat(rawValue);
+            parsedValue = isNaN(numValue) ? 0 : numValue;
+        }
+        return {
+            label: labelValue,
+            value: parsedValue,
+            additional_info: row,
+        };
+    });
+}
 // Function to execute SQL query
 async function executeQuery(sqlQuery, params = []) {
     let connection;
@@ -355,7 +407,7 @@ async function executeQuery(sqlQuery, params = []) {
 // Function to verify query results with AI analysis
 async function verifyQueryResultsWithAI(originalPrompt, sqlQuery, queryResults, columnAnalysis, availableColumns, tableName) {
     const verificationModel = new ChatGoogleGenerativeAI({
-        model: 'gemini-1.5-flash',
+        model: 'gemini-2.5-flash',
         apiKey: process.env.GEMINI_API_KEY,
         temperature: 0.1,
     });
@@ -457,20 +509,29 @@ async function verifyQueryResultsWithAI(originalPrompt, sqlQuery, queryResults, 
 // Function to improve and clarify user prompt using AI
 async function improveUserPrompt(originalPrompt, availableColumns, availableTables, tableName) {
     const promptImprovementModel = new ChatGoogleGenerativeAI({
-        model: 'gemini-1.5-flash',
+        model: 'gemini-2.5-flash',
         apiKey: process.env.GEMINI_API_KEY,
         temperature: 0.1,
     });
     // สร้างข้อมูลบริบทสำหรับการปรับปรุง prompt
     const contextInfo = `
   ตาราง: ${tableName}
-  Columns ที่มี: ${availableColumns.map(col => `${col.name} (${col.type})`).join(', ')}
-  Tables ทั้งหมดในระบบ: ${availableTables.map(table => table.name).join(', ')}
+  Columns ที่มี: ${availableColumns.map((col) => `${col.name} (${col.type})`).join(', ')}
+  Tables ทั้งหมดในระบบ: ${availableTables.map((table) => table.name).join(', ')}
   
   ประเภทข้อมูลหลัก:
-  - Categorical: ${availableColumns.filter(col => col.canBeGrouped && col.isText).map(col => col.name).join(', ')}
-  - Numeric: ${availableColumns.filter(col => col.isNumeric).map(col => col.name).join(', ')}
-  - Date/Time: ${availableColumns.filter(col => col.isDate).map(col => col.name).join(', ')}
+  - Categorical: ${availableColumns
+        .filter((col) => col.canBeGrouped && col.isText)
+        .map((col) => col.name)
+        .join(', ')}
+  - Numeric: ${availableColumns
+        .filter((col) => col.isNumeric)
+        .map((col) => col.name)
+        .join(', ')}
+  - Date/Time: ${availableColumns
+        .filter((col) => col.isDate)
+        .map((col) => col.name)
+        .join(', ')}
   `;
     const improvementPrompt = `
   ช่วยปรับปรุงและทำให้คำถามของผู้ใช้ชัดเจนขึ้น เพื่อให้ AI สามารถสร้าง SQL และกราฟได้ตรงตามความต้องการมากขึ้น:
@@ -527,7 +588,7 @@ async function improveUserPrompt(originalPrompt, availableColumns, availableTabl
                 dataFocus: parsed.data_focus || '',
                 filterSuggestions: parsed.filter_suggestions || [],
                 reasoning: parsed.reasoning || '',
-                wasImproved: parsed.improved_prompt !== originalPrompt
+                wasImproved: parsed.improved_prompt !== originalPrompt,
             };
         }
     }
@@ -543,7 +604,7 @@ async function improveUserPrompt(originalPrompt, availableColumns, availableTabl
         dataFocus: 'ข้อมูลทั่วไป',
         filterSuggestions: [],
         reasoning: 'AI improvement ล้มเหลว',
-        wasImproved: false
+        wasImproved: false,
     };
 }
 // Function to execute query with AI verification and retry logic
@@ -1039,7 +1100,7 @@ app.post('/api/query-stream', async (c) => {
       `;
                 // สร้าง AI model สำหรับวิเคราะห์
                 const analysisModel = new ChatGoogleGenerativeAI({
-                    model: 'gemini-1.5-flash',
+                    model: 'gemini-2.5-flash',
                     apiKey: process.env.GEMINI_API_KEY,
                     temperature: 0.1,
                 });
@@ -1212,17 +1273,11 @@ app.post('/api/query-stream', async (c) => {
                 event: 'update',
             });
             // สร้างผลลัพธ์จากข้อมูลจริง พร้อม format สำหรับ shadcn charts
-            const chartData = queryResult.map((row) => {
-                // แปลงข้อมูลให้เหมาะกับ chart format
-                const keys = Object.keys(row);
-                const labelKey = keys.find((key) => !['count', 'value', 'total'].includes(key)) || keys[0];
-                const valueKey = keys.find((key) => ['count', 'value', 'total'].includes(key)) || keys[1];
-                return {
-                    label: row[labelKey]?.toString() || 'Unknown',
-                    value: parseInt(row[valueKey]) || 0,
-                    additional_info: row,
-                };
-            });
+            const chartData = parseQueryResultToChartData(queryResult, columnAnalysis);
+            // เพิ่ม debug logging เพื่อช่วยแก้ไขปัญหา
+            console.log('Query Result Sample:', queryResult.slice(0, 3));
+            console.log('Chart Data Sample:', chartData.slice(0, 3));
+            console.log('Total Data Points:', chartData.length);
             // Format data สำหรับ shadcn charts
             // Get SQL info from result (either from retry or original)
             const sqlInfo = queryExecutionResult?.sqlData || result;
@@ -1286,7 +1341,22 @@ app.post('/api/query-stream', async (c) => {
                     key_insights: promptImprovement.keyInsights,
                     data_focus: promptImprovement.dataFocus,
                     filter_suggestions: promptImprovement.filterSuggestions,
-                    reasoning: promptImprovement.reasoning
+                    reasoning: promptImprovement.reasoning,
+                },
+                // Add debug info to help troubleshoot data parsing issues
+                debug_info: {
+                    raw_query_sample: queryResult.slice(0, 3),
+                    processed_chart_sample: chartData.slice(0, 3),
+                    data_transformation: {
+                        total_raw_records: queryResult.length,
+                        total_chart_points: chartData.length,
+                        value_fields_detected: queryResult.length > 0 ? Object.keys(queryResult[0]).filter(key => {
+                            const lowKey = key.toLowerCase();
+                            return lowKey.includes('count') || lowKey.includes('value') || lowKey.includes('total') ||
+                                lowKey.includes('sum') || lowKey.includes('amount') || lowKey.includes('number');
+                        }) : [],
+                        all_fields: queryResult.length > 0 ? Object.keys(queryResult[0]) : []
+                    }
                 },
                 available_columns: availableColumns.map((col) => ({
                     name: col.name,
@@ -1298,6 +1368,7 @@ app.post('/api/query-stream', async (c) => {
                     total_columns: availableColumns.length,
                 },
             });
+            console.log('sqlQuery:', sqlQuery);
             const realResult = {
                 ...shadcnChartData,
                 // เก็บ legacy format สำหรับ backward compatibility
@@ -1400,7 +1471,7 @@ app.post('/api/query', async (c) => {
     const body = await c.req.json();
     const userQuery = z.string().parse(body.query);
     const model = new ChatGoogleGenerativeAI({
-        model: 'gemini-2.5-pro',
+        model: 'gemini-2.5-flash',
         apiKey: process.env.GEMINI_API_KEY,
         temperature: 0.3,
     });

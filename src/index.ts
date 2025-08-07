@@ -400,6 +400,66 @@ async function generateSQLQueryWithAI(
   }
 }
 
+// Helper function to better handle data parsing and transformation
+function parseQueryResultToChartData(queryResult: any[], columnAnalysis: any) {
+  if (!queryResult || queryResult.length === 0) {
+    return []
+  }
+
+  return queryResult.map((row, index) => {
+    const keys = Object.keys(row)
+
+    // Improved value key detection
+    const valueKey =
+      keys.find((key) => {
+        const lowKey = key.toLowerCase()
+        return (
+          lowKey.includes('count') ||
+          lowKey.includes('value') ||
+          lowKey.includes('total') ||
+          lowKey.includes('sum') ||
+          lowKey.includes('amount') ||
+          lowKey.includes('number') ||
+          lowKey.includes('frequency') ||
+          lowKey.includes('medal_count') ||
+          lowKey === 'y' ||
+          // Check if the value is numeric
+          (typeof row[key] === 'number' && !lowKey.includes('year') && !lowKey.includes('id'))
+        )
+      }) || keys[keys.length - 1]
+
+    // Handle multi-dimensional data
+    const labelKeys = keys.filter((key) => key !== valueKey)
+    let labelValue = ''
+
+    if (labelKeys.length === 1) {
+      labelValue = row[labelKeys[0]]?.toString() || 'Unknown'
+    } else if (labelKeys.length > 1) {
+      // For multi-dimensional data like year + medal, create meaningful labels
+      labelValue = labelKeys.map((key) => row[key]?.toString() || '').join(' - ')
+    } else {
+      labelValue = `Item ${index + 1}`
+    }
+
+    // Enhanced value parsing
+    let parsedValue = 0
+    const rawValue = row[valueKey]
+
+    if (typeof rawValue === 'number') {
+      parsedValue = rawValue
+    } else if (typeof rawValue === 'string') {
+      const numValue = parseFloat(rawValue)
+      parsedValue = isNaN(numValue) ? 0 : numValue
+    }
+
+    return {
+      label: labelValue,
+      value: parsedValue,
+      additional_info: row,
+    }
+  })
+}
+
 // Function to execute SQL query
 async function executeQuery(sqlQuery: string, params: any[] = []) {
   let connection
@@ -1468,18 +1528,12 @@ app.post('/api/query-stream', async (c: any) => {
       })
 
       // สร้างผลลัพธ์จากข้อมูลจริง พร้อม format สำหรับ shadcn charts
-      const chartData = queryResult.map((row) => {
-        // แปลงข้อมูลให้เหมาะกับ chart format
-        const keys = Object.keys(row)
-        const labelKey = keys.find((key) => !['count', 'value', 'total'].includes(key)) || keys[0]
-        const valueKey = keys.find((key) => ['count', 'value', 'total'].includes(key)) || keys[1]
+      const chartData = parseQueryResultToChartData(queryResult, columnAnalysis)
 
-        return {
-          label: row[labelKey]?.toString() || 'Unknown',
-          value: parseInt(row[valueKey]) || 0,
-          additional_info: row,
-        }
-      })
+      // เพิ่ม debug logging เพื่อช่วยแก้ไขปัญหา
+      console.log('Query Result Sample:', queryResult.slice(0, 3))
+      console.log('Chart Data Sample:', chartData.slice(0, 3))
+      console.log('Total Data Points:', chartData.length)
 
       // Format data สำหรับ shadcn charts
       // Get SQL info from result (either from retry or original)
@@ -1551,6 +1605,30 @@ app.post('/api/query-stream', async (c: any) => {
             data_focus: promptImprovement.dataFocus,
             filter_suggestions: promptImprovement.filterSuggestions,
             reasoning: promptImprovement.reasoning,
+          },
+          // Add debug info to help troubleshoot data parsing issues
+          debug_info: {
+            raw_query_sample: queryResult.slice(0, 3),
+            processed_chart_sample: chartData.slice(0, 3),
+            data_transformation: {
+              total_raw_records: queryResult.length,
+              total_chart_points: chartData.length,
+              value_fields_detected:
+                queryResult.length > 0
+                  ? Object.keys(queryResult[0]).filter((key) => {
+                      const lowKey = key.toLowerCase()
+                      return (
+                        lowKey.includes('count') ||
+                        lowKey.includes('value') ||
+                        lowKey.includes('total') ||
+                        lowKey.includes('sum') ||
+                        lowKey.includes('amount') ||
+                        lowKey.includes('number')
+                      )
+                    })
+                  : [],
+              all_fields: queryResult.length > 0 ? Object.keys(queryResult[0]) : [],
+            },
           },
           available_columns: availableColumns.map((col) => ({
             name: col.name,
