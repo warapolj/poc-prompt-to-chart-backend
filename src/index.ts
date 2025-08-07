@@ -20,7 +20,114 @@ const dbConfig = {
   database: 'poc_chart_db',
 }
 
-// Function to get available columns from database
+// Function to generate SQL query using AI
+async function generateSQLQueryWithAI(
+  columnAnalysis: any,
+  userQuery: string,
+  availableColumns: any[],
+) {
+  const analysisModel = new ChatGoogleGenerativeAI({
+    model: 'gemini-1.5-flash',
+    apiKey: process.env.GEMINI_API_KEY,
+    temperature: 0.1,
+  })
+
+  const columnsInfo = availableColumns
+    .map((col) => `${col.name} (${col.type}): ${col.comment || 'ไม่มีคำอธิบาย'}`)
+    .join('\n')
+
+  const sqlPrompt = `
+  สร้าง SQL query สำหรับข้อมูล Olympic medalists ตามการวิเคราะห์ต่อไปนี้:
+
+  คำถามผู้ใช้: "${userQuery}"
+  
+  ผลการวิเคราะห์:
+  - Columns ที่ต้องใช้: ${columnAnalysis.required_columns.join(', ')}
+  - Chart type: ${columnAnalysis.chart_type}
+  - Data aggregation: ${columnAnalysis.data_aggregation}
+  - X axis: ${columnAnalysis.x_axis}
+  - Y axis: ${columnAnalysis.y_axis}
+
+  Columns ที่มีในตาราง olympic_medalists:
+  ${columnsInfo}
+
+  กฎการสร้าง SQL:
+  1. ใช้เฉพาะ columns ที่มีในตาราง
+  2. สำหรับการนับ (count) ใช้ COUNT(*) AS count
+  3. สำหรับ bar/column chart: SELECT [category], COUNT(*) AS count FROM ... GROUP BY [category] ORDER BY count DESC
+  4. สำหรับ line chart: SELECT year, COUNT(*) AS count FROM ... GROUP BY year ORDER BY year ASC
+  5. สำหรับ pie chart: SELECT [category], COUNT(*) AS count FROM ... GROUP BY [category] ORDER BY count DESC LIMIT 8
+  6. ใช้ WHERE clause สำหรับ filter:
+     - ประเทศไทย: WHERE (country_code = 'THA' OR country LIKE '%Thailand%')
+     - ประเทศอื่นๆ: WHERE country_code = 'USA' (แทน USA ด้วยรหัสประเทศที่เหมาะสม)
+     - ปีเฉพาะ: WHERE year = 2024 (แทนด้วยปีที่พูดถึง)
+     - เหรียญเฉพาะ: WHERE medal = 'Gold' (หรือ Silver, Bronze)
+     - กีฬาเฉพาะ: WHERE sport = 'Swimming' (แทนด้วยชื่อกีฬา)
+  7. LIMIT ไม่เกิน 20 รายการสำหรับ bar/column chart
+  8. ไม่ใช้ LIMIT สำหรับ line chart เพื่อให้เห็นแนวโน้มทั้งหมด
+  9. วิเคราะห์คำถามให้ละเอียด เพื่อกำหนด WHERE clause ที่เหมาะสม
+
+  ตัวอย่าง:
+  - "เหรียญทองของไทย" → WHERE (country_code = 'THA' OR country LIKE '%Thailand%') AND medal = 'Gold'
+  - "การเปลี่ยนแปลงเหรียญของ USA" → WHERE country_code = 'USA' และ GROUP BY year
+  - "กีฬาที่ไทยได้เหรียญ" → WHERE (country_code = 'THA' OR country LIKE '%Thailand%') และ GROUP BY sport
+
+  ตอบกลับเป็น JSON object เท่านั้น:
+  {
+    "sql_query": "SELECT column1, COUNT(*) AS count FROM olympic_medalists WHERE ... GROUP BY column1 ORDER BY count DESC LIMIT 10",
+    "explanation": "คำอธิบายว่าทำไมสร้าง query นี้ รวมถึง WHERE clause ที่ใช้"
+  }
+  `
+
+  try {
+    const sqlResult = await analysisModel.invoke(sqlPrompt)
+
+    // แปลง content เป็น string และหา JSON
+    const contentString =
+      typeof sqlResult.content === 'string' ? sqlResult.content : JSON.stringify(sqlResult.content)
+
+    const jsonMatch = contentString.match(/\{[\s\S]*\}/)
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0])
+      return {
+        sqlQuery: parsed.sql_query,
+        explanation: parsed.explanation,
+      }
+    }
+  } catch (error) {
+    console.error('Error generating SQL with AI:', error)
+  }
+
+  // Fallback query หาก AI ไม่สามารถสร้างได้
+  return {
+    sqlQuery: `
+      SELECT country, COUNT(*) as count
+      FROM olympic_medalists 
+      WHERE medal = 'Gold'
+      GROUP BY country
+      ORDER BY count DESC
+      LIMIT 10
+    `.trim(),
+    explanation: 'Fallback query: แสดงประเทศที่ได้เหรียญทองมากที่สุด',
+  }
+}
+
+// Function to execute SQL query
+async function executeQuery(sqlQuery: string, params: any[] = []) {
+  let connection
+  try {
+    connection = await mysql.createConnection(dbConfig)
+    const [rows] = await connection.execute(sqlQuery, params)
+    return rows as any[]
+  } catch (error) {
+    console.error('Error executing query:', error)
+    throw error
+  } finally {
+    if (connection) {
+      await connection.end()
+    }
+  }
+}
 async function getAvailableColumns() {
   let connection
   try {
@@ -224,6 +331,20 @@ app.get('/', (c: any) => {
                         if (data.result.metadata && data.result.metadata.database_info) {
                             addMessage('🗄️ Database: เชื่อมต่อสำเร็จ, มี ' + data.result.metadata.database_info.total_columns + ' columns', 'result');
                         }
+                        if (data.result.metadata && data.result.metadata.sql_query) {
+                            addMessage('📝 SQL Query: ' + data.result.metadata.sql_query.replace(/\s+/g, ' ').trim(), 'result');
+                        }
+                        if (data.result.metadata && data.result.metadata.sql_explanation) {
+                            addMessage('💭 SQL Explanation: ' + data.result.metadata.sql_explanation, 'result');
+                        }
+                        if (data.result.metadata && data.result.metadata.query_execution) {
+                            const exec = data.result.metadata.query_execution;
+                            if (exec.success) {
+                                addMessage('✅ Query สำเร็จ: ได้ข้อมูล ' + exec.rows_returned + ' รายการ', 'result');
+                            } else {
+                                addMessage('❌ Query ไม่สำเร็จ: ' + exec.error, 'error');
+                            }
+                        }
                         addMessage('ผลลัพธ์: ' + JSON.stringify(data.result, null, 2), 'result');
                         break;
                     case 'error':
@@ -350,6 +471,35 @@ app.get('/', (c: any) => {
     </body>
     </html>
   `)
+})
+
+// API สำหรับทดสอบ SQL query
+app.post('/api/test-query', async (c: any) => {
+  try {
+    const body = await c.req.json()
+    const { query } = body
+
+    if (!query) {
+      return c.json({ success: false, error: 'Query is required' }, 400)
+    }
+
+    const result = await executeQuery(query)
+
+    return c.json({
+      success: true,
+      query: query,
+      result: result,
+      rows_count: result.length,
+    })
+  } catch (error) {
+    return c.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      },
+      500,
+    )
+  }
 })
 
 // API สำหรับทดสอบการเชื่อมต่อฐานข้อมูล
@@ -547,39 +697,138 @@ app.post('/api/query-stream', async (c: any) => {
         event: 'update',
       })
 
-      // จำลองการประมวลผล
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-
+      // สร้าง SQL query
       await stream.writeSSE({
         data: JSON.stringify({
           type: 'status',
-          message: 'กำลังสร้างผลลัพธ์...',
+          message: 'กำลังให้ AI สร้าง SQL query...',
           progress: 80,
         }),
         event: 'update',
       })
 
-      // สร้างผลลัพธ์ตาม columns ที่วิเคราะห์ได้
-      const mockResult = {
+      const { sqlQuery, explanation } = await generateSQLQueryWithAI(
+        columnAnalysis,
+        userQuery,
+        availableColumns,
+      )
+
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: 'status',
+          message: `สร้าง SQL สำเร็จ: ${explanation}`,
+          progress: 83,
+        }),
+        event: 'update',
+      })
+
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: 'status',
+          message: 'กำลัง execute query ในฐานข้อมูล...',
+          progress: 85,
+        }),
+        event: 'update',
+      })
+
+      // Execute query และรับข้อมูลจริง
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: 'status',
+          message: 'กำลังดึงข้อมูลจากฐานข้อมูล...',
+          progress: 85,
+        }),
+        event: 'update',
+      })
+
+      let queryResult = []
+      let executionError = null
+
+      try {
+        queryResult = await executeQuery(sqlQuery)
+
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: 'status',
+            message: `Query สำเร็จ! พบข้อมูล ${queryResult.length} รายการ`,
+            progress: 90,
+          }),
+          event: 'update',
+        })
+      } catch (error) {
+        executionError = error
+        console.error('Query execution failed:', error)
+
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: 'status',
+            message: 'Query ไม่สำเร็จ ใช้ข้อมูลจำลองแทน...',
+            progress: 90,
+          }),
+          event: 'update',
+        })
+
+        // ใช้ข้อมูลจำลองหาก query ไม่สำเร็จ
+        queryResult = [
+          { label: 'Mock Data 1', count: 100 },
+          { label: 'Mock Data 2', count: 200 },
+          { label: 'Mock Data 3', count: 150 },
+        ]
+      }
+
+      // จำลองการประมวลผล
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: 'status',
+          message: 'กำลังสร้างผลลัพธ์...',
+          progress: 95,
+        }),
+        event: 'update',
+      })
+
+      // สร้างผลลัพธ์จากข้อมูลจริง
+      const chartData = queryResult.map((row) => {
+        // แปลงข้อมูลให้เหมาะกับ chart format
+        const keys = Object.keys(row)
+        const labelKey = keys.find((key) => !['count', 'value', 'total'].includes(key)) || keys[0]
+        const valueKey = keys.find((key) => ['count', 'value', 'total'].includes(key)) || keys[1]
+
+        return {
+          label: row[labelKey]?.toString() || 'Unknown',
+          value: parseInt(row[valueKey]) || 0,
+          additional_info: row,
+        }
+      })
+
+      const realResult = {
         chart_type: columnAnalysis.chart_type,
         title: `ผลลัพธ์สำหรับ: ${userQuery}`,
-        data: [
-          { label: 'ข้อมูลตัวอย่าง 1', value: 100 },
-          { label: 'ข้อมูลตัวอย่าง 2', value: 200 },
-          { label: 'ข้อมูลตัวอย่าง 3', value: 150 },
-        ],
+        data: chartData,
         metadata: {
           columns_used: columnAnalysis.required_columns,
           aggregation_method: columnAnalysis.data_aggregation || 'count',
           filters_applied: [],
-          total_records: 3,
-          data_range: 'mock data based on analysis',
+          total_records: chartData.length,
+          data_range: executionError ? 'mock data (query failed)' : 'real data from database',
           analysis: columnAnalysis.analysis,
           chart_reasoning: columnAnalysis.chart_reasoning,
           alternative_charts: columnAnalysis.alternative_charts || [],
           axis_info: {
             x_axis: columnAnalysis.x_axis,
             y_axis: columnAnalysis.y_axis,
+          },
+          sql_query: sqlQuery,
+          sql_explanation: explanation,
+          query_execution: {
+            success: !executionError,
+            error: executionError
+              ? executionError instanceof Error
+                ? executionError.message
+                : 'Unknown error'
+              : null,
+            rows_returned: queryResult.length,
           },
           available_columns: availableColumns.map((col) => ({
             name: col.name,
@@ -599,7 +848,7 @@ app.post('/api/query-stream', async (c: any) => {
           type: 'result',
           message: 'การประมวลผลเสร็จสิ้น',
           progress: 100,
-          result: mockResult,
+          result: realResult,
           column_analysis: columnAnalysis,
         }),
         event: 'complete',
