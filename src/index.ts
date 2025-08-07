@@ -293,6 +293,39 @@ async function analyzeTableStructure(tableName: string) {
   }
 }
 
+// Helper function to detect chart type from user query
+function detectChartTypeFromQuery(userQuery: string): string | null {
+  const query = userQuery.toLowerCase()
+  const chartPatterns = {
+    bar: ['bar chart', 'กราฟแท่ง', 'แผนภูมิแท่ง', 'แท่ง', 'เปรียบเทียบ'],
+    column: ['column chart', 'กราฟคอลัมน์', 'แผนภูมิคอลัมน์', 'คอลัมน์'],
+    line: [
+      'line chart',
+      'กราฟเส้น',
+      'แผนภูมิเส้น',
+      'เส้น',
+      'การเปลี่ยนแปลง',
+      'ตลอดเวลา',
+      'ตามเวลา',
+    ],
+    pie: ['pie chart', 'กราฟวงกลม', 'แผนภูมิวงกลม', 'สัดส่วน', 'เปอร์เซ็นต์', 'pie'],
+    donut: ['donut chart', 'กราฟโดนัท', 'แผนภูมิโดนัท', 'donut'],
+    area: ['area chart', 'กราฟพื้นที่', 'แผนภูมิพื้นที่', 'สะสม'],
+    scatter: ['scatter plot', 'scatter chart', 'กราฟกระจาย', 'จุดกระจาย', 'ความสัมพันธ์'],
+    histogram: ['histogram', 'กราฟแจกแจง', 'การกระจาย', 'ฮิสโตแกรม'],
+  }
+
+  for (const [chartType, patterns] of Object.entries(chartPatterns)) {
+    for (const pattern of patterns) {
+      if (query.includes(pattern)) {
+        return chartType
+      }
+    }
+  }
+
+  return null
+}
+
 // Helper function to suggest chart types based on column properties
 function getSuggestedChartTypes(columnName: string, dataType: string, comment: string): string[] {
   const suggestions: string[] = []
@@ -949,7 +982,55 @@ app.post('/api/query-stream', async (c: any) => {
         .map((col) => col.name)
         .join(', ')
 
-      const columnAnalysisPrompt = `
+      // ตรวจสอบว่าผู้ใช้ระบุประเภท chart มาแล้วหรือไม่
+      const detectedChartType = detectChartTypeFromQuery(userQuery)
+      let columnAnalysis
+
+      if (detectedChartType) {
+        // ถ้าผู้ใช้ระบุ chart type มาแล้ว ข้าม AI analysis
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: 'status',
+            message: `ตรวจพบประเภทกราฟ: ${detectedChartType} - ข้าม AI analysis`,
+            progress: 70,
+          }),
+          event: 'update',
+        })
+
+        // สร้าง columnAnalysis แบบ simplified
+        const relevantColumns = availableColumns.filter((col) => col.canBeGrouped).slice(0, 2)
+        const primaryColumn = relevantColumns.length > 0 ? relevantColumns[0].name : 'country'
+
+        columnAnalysis = {
+          required_columns: relevantColumns.map((col) => col.name),
+          chart_type: detectedChartType,
+          alternative_charts: availableColumns
+            .filter((col) => col.suggestedChartTypes.includes(detectedChartType))
+            .flatMap((col) => col.suggestedChartTypes)
+            .filter((type) => type !== detectedChartType)
+            .slice(0, 2),
+          analysis: `ใช้ประเภทกราฟที่ผู้ใช้ระบุ: ${detectedChartType}`,
+          chart_reasoning: `ผู้ใช้ระบุประเภทกราฟ ${detectedChartType} ในคำถาม จึงข้าม AI analysis`,
+          data_aggregation: 'count',
+          x_axis: primaryColumn,
+          y_axis: 'count',
+          suggested_filters: [],
+          column_reasoning: `เลือก columns ที่ groupable ได้สำหรับ ${detectedChartType} chart`,
+        }
+
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: 'status',
+            message: `ใช้ ${detectedChartType} chart กับ columns ${columnAnalysis.required_columns.join(
+              ', ',
+            )}`,
+            progress: 75,
+          }),
+          event: 'update',
+        })
+      } else {
+        // วิเคราะห์ด้วย AI เหมือนเดิม
+        const columnAnalysisPrompt = `
       วิเคราะห์คำถามต่อไปนี้และระบุว่าต้องใช้ column ไหนจากข้อมูลและเลือก chart type ที่เหมาะสมที่สุด:
       
       คำถาม: "${userQuery}"
@@ -993,73 +1074,74 @@ app.post('/api/query-stream', async (c: any) => {
       }
       `
 
-      // สร้าง AI model สำหรับวิเคราะห์
-      const analysisModel = new ChatGoogleGenerativeAI({
-        model: 'gemini-1.5-flash',
-        apiKey: process.env.GEMINI_API_KEY,
-        temperature: 0.1,
-      })
+        // สร้าง AI model สำหรับวิเคราะห์
+        const analysisModel = new ChatGoogleGenerativeAI({
+          model: 'gemini-1.5-flash',
+          apiKey: process.env.GEMINI_API_KEY,
+          temperature: 0.1,
+        })
 
-      await stream.writeSSE({
-        data: JSON.stringify({
-          type: 'status',
-          message: 'กำลังวิเคราะห์คำถามด้วย AI...',
-          progress: 65,
-        }),
-        event: 'update',
-      })
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: 'status',
+            message: 'กำลังวิเคราะห์คำถามด้วย AI...',
+            progress: 65,
+          }),
+          event: 'update',
+        })
 
-      const analysisResult = await analysisModel.invoke(columnAnalysisPrompt)
-      let columnAnalysis
+        const analysisResult = await analysisModel.invoke(columnAnalysisPrompt)
 
-      try {
-        // แปลง content เป็น string และหา JSON
-        const contentString =
-          typeof analysisResult.content === 'string'
-            ? analysisResult.content
-            : JSON.stringify(analysisResult.content)
+        try {
+          // แปลง content เป็น string และหา JSON
+          const contentString =
+            typeof analysisResult.content === 'string'
+              ? analysisResult.content
+              : JSON.stringify(analysisResult.content)
 
-        const jsonMatch = contentString.match(/\{[\s\S]*\}/)
-        if (jsonMatch) {
-          columnAnalysis = JSON.parse(jsonMatch[0])
-        } else {
-          throw new Error('ไม่พบ JSON ในการตอบ')
+          const jsonMatch = contentString.match(/\{[\s\S]*\}/)
+          if (jsonMatch) {
+            columnAnalysis = JSON.parse(jsonMatch[0])
+          } else {
+            throw new Error('ไม่พบ JSON ในการตอบ')
+          }
+        } catch (parseError) {
+          console.error('Error parsing AI response:', parseError)
+          // ใช้ค่า default หากไม่สามารถ parse ได้ - เลือกจาก column capabilities
+          const defaultGroupableColumns = availableColumns
+            .filter((col) => col.canBeGrouped)
+            .slice(0, 2)
+            .map((col) => col.name)
+          const defaultXAxis =
+            availableColumns.filter((col) => col.canBeGrouped)[0]?.name || 'country'
+
+          columnAnalysis = {
+            required_columns:
+              defaultGroupableColumns.length > 0 ? defaultGroupableColumns : ['country', 'medal'],
+            chart_type: 'bar',
+            alternative_charts: ['column', 'pie'],
+            analysis: 'ไม่สามารถวิเคราะห์ได้ ใช้ค่าเริ่มต้นจาก column capabilities',
+            chart_reasoning:
+              'ใช้กราฟแท่งเปรียบเทียบข้อมูลพื้นฐาน โดยเลือก columns ที่ groupable ได้',
+            data_aggregation: 'count',
+            x_axis: defaultXAxis,
+            y_axis: 'count',
+            suggested_filters: [],
+            column_reasoning: 'เลือกจาก columns ที่มี canBeGrouped = true',
+          }
         }
-      } catch (parseError) {
-        console.error('Error parsing AI response:', parseError)
-        // ใช้ค่า default หากไม่สามารถ parse ได้ - เลือกจาก column capabilities
-        const defaultGroupableColumns = availableColumns
-          .filter((col) => col.canBeGrouped)
-          .slice(0, 2)
-          .map((col) => col.name)
-        const defaultXAxis =
-          availableColumns.filter((col) => col.canBeGrouped)[0]?.name || 'country'
 
-        columnAnalysis = {
-          required_columns:
-            defaultGroupableColumns.length > 0 ? defaultGroupableColumns : ['country', 'medal'],
-          chart_type: 'bar',
-          alternative_charts: ['column', 'pie'],
-          analysis: 'ไม่สามารถวิเคราะห์ได้ ใช้ค่าเริ่มต้นจาก column capabilities',
-          chart_reasoning: 'ใช้กราฟแท่งเปรียบเทียบข้อมูลพื้นฐาน โดยเลือก columns ที่ groupable ได้',
-          data_aggregation: 'count',
-          x_axis: defaultXAxis,
-          y_axis: 'count',
-          suggested_filters: [],
-          column_reasoning: 'เลือกจาก columns ที่มี canBeGrouped = true',
-        }
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: 'status',
+            message: `ผลการวิเคราะห์: ใช้ ${
+              columnAnalysis.chart_type
+            } chart กับ columns ${columnAnalysis.required_columns.join(', ')}`,
+            progress: 75,
+          }),
+          event: 'update',
+        })
       }
-
-      await stream.writeSSE({
-        data: JSON.stringify({
-          type: 'status',
-          message: `ผลการวิเคราะห์: ใช้ ${
-            columnAnalysis.chart_type
-          } chart กับ columns ${columnAnalysis.required_columns.join(', ')}`,
-          progress: 75,
-        }),
-        event: 'update',
-      })
 
       // สร้าง SQL query
       await stream.writeSSE({
