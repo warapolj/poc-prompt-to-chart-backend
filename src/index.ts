@@ -11,6 +11,13 @@ import { cors } from 'hono/cors'
 import mysql from 'mysql2/promise'
 import 'dotenv/config'
 
+// Import chart configuration
+import {
+  formatDataForShadcn,
+  generateShadcnChartResponse,
+  type ChartType,
+} from '../packages/chart-config.js'
+
 // Database configuration
 const dbConfig = {
   host: 'localhost',
@@ -1135,11 +1142,13 @@ app.post('/api/query-stream', async (c: any) => {
           event: 'update',
         })
 
-        // ใช้ข้อมูลจำลองหาก query ไม่สำเร็จ
+        // ใช้ข้อมูลจำลองหาก query ไม่สำเร็จ - format ให้เหมาะกับการใช้งาน
         queryResult = [
-          { label: 'Mock Data 1', count: 100 },
-          { label: 'Mock Data 2', count: 200 },
-          { label: 'Mock Data 3', count: 150 },
+          { label: 'USA', count: 300 },
+          { label: 'China', count: 250 },
+          { label: 'Japan', count: 150 },
+          { label: 'Great Britain', count: 120 },
+          { label: 'Germany', count: 100 },
         ]
       }
 
@@ -1155,7 +1164,7 @@ app.post('/api/query-stream', async (c: any) => {
         event: 'update',
       })
 
-      // สร้างผลลัพธ์จากข้อมูลจริง
+      // สร้างผลลัพธ์จากข้อมูลจริง พร้อม format สำหรับ shadcn charts
       const chartData = queryResult.map((row) => {
         // แปลงข้อมูลให้เหมาะกับ chart format
         const keys = Object.keys(row)
@@ -1169,11 +1178,54 @@ app.post('/api/query-stream', async (c: any) => {
         }
       })
 
+      // Format data สำหรับ shadcn charts
+      const shadcnChartData = generateShadcnChartResponse(
+        columnAnalysis.chart_type as ChartType,
+        chartData,
+        `ผลลัพธ์สำหรับ: ${userQuery}`,
+        {
+          columns_used: columnsUsed.length > 0 ? columnsUsed : columnAnalysis.required_columns,
+          aggregation_method: columnAnalysis.data_aggregation || 'count',
+          filters_applied: filtersApplied.length > 0 ? filtersApplied : [],
+          total_records: chartData.length,
+          data_range: executionError ? 'mock data (query failed)' : 'real data from database',
+          analysis: columnAnalysis.analysis,
+          chart_reasoning: columnAnalysis.chart_reasoning,
+          alternative_charts: columnAnalysis.alternative_charts || [],
+          axis_info: {
+            x_axis: columnAnalysis.x_axis,
+            y_axis: columnAnalysis.y_axis,
+          },
+          sql_query: sqlQuery,
+          sql_explanation: explanation,
+          sql_reasoning: queryReasoning,
+          chart_suitability: chartSuitability,
+          query_execution: {
+            success: !executionError,
+            error: executionError
+              ? executionError instanceof Error
+                ? executionError.message
+                : 'Unknown error'
+              : null,
+            rows_returned: queryResult.length,
+          },
+          available_columns: availableColumns.map((col) => ({
+            name: col.name,
+            type: col.type,
+            comment: col.comment,
+          })),
+          database_info: {
+            connected: true,
+            total_columns: availableColumns.length,
+          },
+        },
+      )
+
       const realResult = {
-        chart_type: columnAnalysis.chart_type,
-        title: `ผลลัพธ์สำหรับ: ${userQuery}`,
-        data: chartData,
-        metadata: {
+        ...shadcnChartData,
+        // เก็บ legacy format สำหรับ backward compatibility
+        legacy_data: chartData,
+        legacy_metadata: {
           columns_used: columnsUsed.length > 0 ? columnsUsed : columnAnalysis.required_columns,
           aggregation_method: columnAnalysis.data_aggregation || 'count',
           filters_applied: filtersApplied.length > 0 ? filtersApplied : [],
