@@ -14,6 +14,7 @@
     "dotenv": "^17.2.1",
     "hono": "^4.8.12",
     "langchain": "^0.3.30",
+    "mysql2": "^3.14.3",
     "zod": "^4.0.14"
   },
   "devDependencies": {
