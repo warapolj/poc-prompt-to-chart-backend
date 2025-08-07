@@ -199,7 +199,7 @@ async function generateSQLQueryWithAI(
   tableName: string = 'olympic_medalists',
 ) {
   const analysisModel = new ChatGoogleGenerativeAI({
-    model: 'gemini-1.5-flash',
+    model: 'gemini-2.5-flash',
     apiKey: process.env.GEMINI_API_KEY,
     temperature: 0.1,
   })
@@ -427,7 +427,7 @@ async function verifyQueryResultsWithAI(
   tableName: string,
 ) {
   const verificationModel = new ChatGoogleGenerativeAI({
-    model: 'gemini-1.5-flash',
+    model: 'gemini-2.5-flash',
     apiKey: process.env.GEMINI_API_KEY,
     temperature: 0.1,
   })
@@ -532,6 +532,119 @@ async function verifyQueryResultsWithAI(
       relevance: 'ไม่ทราบ',
       accuracy: 'ไม่ทราบ',
     },
+  }
+}
+
+// Function to improve and clarify user prompt using AI
+async function improveUserPrompt(
+  originalPrompt: string,
+  availableColumns: any[],
+  availableTables: any[],
+  tableName: string,
+) {
+  const promptImprovementModel = new ChatGoogleGenerativeAI({
+    model: 'gemini-2.5-flash',
+    apiKey: process.env.GEMINI_API_KEY,
+    temperature: 0.1,
+  })
+
+  // สร้างข้อมูลบริบทสำหรับการปรับปรุง prompt
+  const contextInfo = `
+  ตาราง: ${tableName}
+  Columns ที่มี: ${availableColumns.map((col) => `${col.name} (${col.type})`).join(', ')}
+  Tables ทั้งหมดในระบบ: ${availableTables.map((table) => table.name).join(', ')}
+  
+  ประเภทข้อมูลหลัก:
+  - Categorical: ${availableColumns
+    .filter((col) => col.canBeGrouped && col.isText)
+    .map((col) => col.name)
+    .join(', ')}
+  - Numeric: ${availableColumns
+    .filter((col) => col.isNumeric)
+    .map((col) => col.name)
+    .join(', ')}
+  - Date/Time: ${availableColumns
+    .filter((col) => col.isDate)
+    .map((col) => col.name)
+    .join(', ')}
+  `
+
+  const improvementPrompt = `
+  ช่วยปรับปรุงและทำให้คำถามของผู้ใช้ชัดเจนขึ้น เพื่อให้ AI สามารถสร้าง SQL และกราฟได้ตรงตามความต้องการมากขึ้น:
+
+  คำถามต้นฉบับ: "${originalPrompt}"
+
+  ข้อมูลบริบท:
+  ${contextInfo}
+
+  เป้าหมายการปรับปรุง:
+  1. ระบุประเภทกราฟที่ต้องการ (ถ้าไม่ชัดเจน)
+  2. ชี้แจงข้อมูลที่ต้องการวิเคราะห์
+  3. เพิ่มรายละเอียดการกรองข้อมูล (filters)
+  4. ระบุช่วงเวลา หรือเงื่อนไขเฉพาะ
+  5. ปรับให้เหมาะสมกับข้อมูลที่มีอยู่จริง
+
+  หลักการปรับปรุง:
+  - เก็บความหมายเดิมของคำถาม
+  - เพิ่มความชัดเจนและรายละเอียด
+  - ใช้ศัพท์ที่ตรงกับ columns ที่มีอยู่
+  - แนะนำประเภทกราฟที่เหมาะสม
+  - เพิ่ม context ที่จำเป็น
+
+  ตัวอย่างการปรับปรุง:
+  - "เหรียญของไทย" → "แสดงจำนวนเหรียญทั้งหมดของประเทศไทย แยกตามประเภทเหรียญ (ทอง, เงิน, ทองแดง) ในรูปแบบกราฟแท่ง"
+  - "กีฬาแต่ละปี" → "แสดงจำนวนเหรียญในแต่ละกีฬาตลอดปี 2020-2024 ในรูปแบบกราฟเส้น"
+  - "เปรียบเทียบประเทศ" → "เปรียบเทียบจำนวนเหรียญรวมของ 10 ประเทศที่ได้เหรียญมากที่สุด ในรูปแบบกราฟแท่ง"
+
+  ตอบกลับเป็น JSON object เท่านั้น:
+  {
+    "improved_prompt": "คำถามที่ปรับปรุงแล้ว",
+    "improvements_made": ["รายการการปรับปรุงที่ทำ"],
+    "suggested_chart_type": "ประเภทกราฟที่แนะนำ",
+    "key_insights": "ข้อมูลเชิงลึกที่คาดว่าจะได้",
+    "data_focus": "จุดเน้นของข้อมูลที่จะวิเคราะห์",
+    "filter_suggestions": ["เงื่อนไขการกรองที่แนะนำ"],
+    "reasoning": "เหตุผลในการปรับปรุง"
+  }
+  `
+
+  try {
+    const improvementResult = await promptImprovementModel.invoke(improvementPrompt)
+
+    // แปลง content เป็น string และหา JSON
+    const contentString =
+      typeof improvementResult.content === 'string'
+        ? improvementResult.content
+        : JSON.stringify(improvementResult.content)
+
+    const jsonMatch = contentString.match(/\{[\s\S]*\}/)
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0])
+      return {
+        improvedPrompt: parsed.improved_prompt || originalPrompt,
+        improvementsMade: parsed.improvements_made || [],
+        suggestedChartType: parsed.suggested_chart_type || null,
+        keyInsights: parsed.key_insights || '',
+        dataFocus: parsed.data_focus || '',
+        filterSuggestions: parsed.filter_suggestions || [],
+        reasoning: parsed.reasoning || '',
+        wasImproved: parsed.improved_prompt !== originalPrompt,
+      }
+    }
+  } catch (error) {
+    console.error('Error improving user prompt:', error)
+  }
+
+  // Fallback - return original prompt with basic improvements
+  return {
+    improvedPrompt: originalPrompt,
+    improvementsMade: ['ไม่สามารถปรับปรุงได้ - ใช้ prompt เดิม'],
+    suggestedChartType: null,
+    keyInsights: 'ไม่สามารถวิเคราะห์ได้',
+    dataFocus: 'ข้อมูลทั่วไป',
+    filterSuggestions: [],
+    reasoning: 'AI improvement ล้มเหลว',
+    wasImproved: false,
   }
 }
 
@@ -945,6 +1058,47 @@ app.post('/api/query-stream', async (c: any) => {
 
       const availableColumns = await getAvailableColumns(tableName)
 
+      // ปรับปรุง prompt ให้ชัดเจนขึ้น
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: 'status',
+          message: 'กำลังปรับปรุงคำถามให้ชัดเจนขึ้น...',
+          progress: 59,
+        }),
+        event: 'update',
+      })
+
+      const promptImprovement = await improveUserPrompt(
+        userQuery,
+        availableColumns,
+        availableTables,
+        tableName,
+      )
+
+      const finalUserQuery = promptImprovement.improvedPrompt
+
+      if (promptImprovement.wasImproved) {
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: 'status',
+            message: `ปรับปรุงคำถาม: "${finalUserQuery.substring(0, 100)}${
+              finalUserQuery.length > 100 ? '...' : ''
+            }"`,
+            progress: 60,
+          }),
+          event: 'update',
+        })
+      } else {
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: 'status',
+            message: 'คำถามชัดเจนแล้ว ไม่ต้องปรับปรุง',
+            progress: 60,
+          }),
+          event: 'update',
+        })
+      }
+
       const databaseStatus =
         availableColumns.length > 0 && availableColumns[0].comment !== 'ไม่มีคำอธิบาย'
           ? 'เชื่อมต่อฐานข้อมูลสำเร็จ'
@@ -992,8 +1146,8 @@ app.post('/api/query-stream', async (c: any) => {
         .map((col) => col.name)
         .join(', ')
 
-      // ตรวจสอบว่าผู้ใช้ระบุประเภท chart มาแล้วหรือไม่
-      const detectedChartType = detectChartTypeFromQuery(userQuery)
+      // ตรวจสอบว่าผู้ใช้ระบุประเภท chart มาแล้วหรือไม่ (ใช้ query ที่ปรับปรุงแล้ว)
+      const detectedChartType = detectChartTypeFromQuery(finalUserQuery)
       let columnAnalysis
 
       if (detectedChartType) {
@@ -1039,11 +1193,16 @@ app.post('/api/query-stream', async (c: any) => {
           event: 'update',
         })
       } else {
-        // วิเคราะห์ด้วย AI เหมือนเดิม
+        // วิเคราะห์ด้วย AI เหมือนเดิม (ใช้ query ที่ปรับปรุงแล้ว)
         const columnAnalysisPrompt = `
       วิเคราะห์คำถามต่อไปนี้และระบุว่าต้องใช้ column ไหนจากข้อมูลและเลือก chart type ที่เหมาะสมที่สุด:
       
-      คำถาม: "${userQuery}"
+      คำถามต้นฉบับ: "${userQuery}"
+      คำถามที่ปรับปรุงแล้ว: "${finalUserQuery}"
+      
+      การปรับปรุงที่ทำ: ${promptImprovement.improvementsMade.join(', ')}
+      Chart type ที่แนะนำ: ${promptImprovement.suggestedChartType || 'ไม่มี'}
+      จุดเน้นข้อมูล: ${promptImprovement.dataFocus}
       
       Columns ที่มีในข้อมูล (พร้อม capabilities):
       ${columnsDescription}
@@ -1086,7 +1245,7 @@ app.post('/api/query-stream', async (c: any) => {
 
         // สร้าง AI model สำหรับวิเคราะห์
         const analysisModel = new ChatGoogleGenerativeAI({
-          model: 'gemini-1.5-flash',
+          model: 'gemini-2.5-flash',
           apiKey: process.env.GEMINI_API_KEY,
           temperature: 0.1,
         })
@@ -1186,7 +1345,7 @@ app.post('/api/query-stream', async (c: any) => {
 
       const result = await generateSQLQueryWithAI(
         columnAnalysis,
-        userQuery,
+        finalUserQuery, // ใช้ query ที่ปรับปรุงแล้ว
         availableColumns,
         sampleData,
         tableName, // dynamic table name based on auto-detection
@@ -1231,7 +1390,7 @@ app.post('/api/query-stream', async (c: any) => {
 
       // Execute query with AI verification and retry logic
       const queryExecutionResult = await executeQueryWithRetry(
-        userQuery,
+        finalUserQuery, // ใช้ query ที่ปรับปรุงแล้ว
         columnAnalysis,
         availableColumns,
         sampleData,
@@ -1335,7 +1494,7 @@ app.post('/api/query-stream', async (c: any) => {
       const shadcnChartData = generateShadcnChartResponse(
         columnAnalysis.chart_type as ChartType,
         chartData,
-        `ผลลัพธ์สำหรับ: ${userQuery}`,
+        `ผลลัพธ์สำหรับ: ${promptImprovement.wasImproved ? finalUserQuery : userQuery}`,
         {
           columns_used:
             actualColumnsUsed.length > 0 ? actualColumnsUsed : columnAnalysis.required_columns,
@@ -1381,6 +1540,18 @@ app.post('/api/query-stream', async (c: any) => {
                 final_success: queryExecutionResult.success,
               }
             : null,
+          // Add prompt improvement info
+          prompt_improvement: {
+            original_prompt: userQuery,
+            improved_prompt: finalUserQuery,
+            was_improved: promptImprovement.wasImproved,
+            improvements_made: promptImprovement.improvementsMade,
+            suggested_chart_type: promptImprovement.suggestedChartType,
+            key_insights: promptImprovement.keyInsights,
+            data_focus: promptImprovement.dataFocus,
+            filter_suggestions: promptImprovement.filterSuggestions,
+            reasoning: promptImprovement.reasoning,
+          },
           available_columns: availableColumns.map((col) => ({
             name: col.name,
             type: col.type,
@@ -1392,7 +1563,7 @@ app.post('/api/query-stream', async (c: any) => {
           },
         },
       )
-
+      console.log('sqlQuery:', sqlQuery)
       const realResult = {
         ...shadcnChartData,
         // เก็บ legacy format สำหรับ backward compatibility
@@ -1501,7 +1672,7 @@ app.post('/api/query', async (c: any) => {
   const userQuery = z.string().parse(body.query)
 
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-2.5-pro',
+    model: 'gemini-2.5-flash',
     apiKey: process.env.GEMINI_API_KEY,
     temperature: 0.3,
   })

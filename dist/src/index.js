@@ -29,9 +29,9 @@ async function getAvailableTables() {
        FROM INFORMATION_SCHEMA.TABLES 
        WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
        ORDER BY TABLE_NAME`, [dbConfig.database]);
-        return tables.map(table => ({
+        return tables.map((table) => ({
             name: table.table_name,
-            comment: table.table_comment || 'ไม่มีคำอธิบาย'
+            comment: table.table_comment || 'ไม่มีคำอธิบาย',
         }));
     }
     catch (error) {
@@ -49,20 +49,45 @@ async function detectBestTable(userQuery, availableTables) {
     const query = userQuery.toLowerCase();
     // Keywords mapping for different types of data
     const tableKeywords = {
-        olympic: ['เหรียญ', 'โอลิมปิก', 'กีฬา', 'นักกีฬา', 'ประเทศ', 'ทอง', 'เงิน', 'ทองแดง', 'medal', 'olympic', 'sport', 'athlete', 'country'],
-        sales: ['ขาย', 'รายได้', 'ลูกค้า', 'สินค้า', 'การขาย', 'sale', 'revenue', 'customer', 'product'],
+        olympic: [
+            'เหรียญ',
+            'โอลิมปิก',
+            'กีฬา',
+            'นักกีฬา',
+            'ประเทศ',
+            'ทอง',
+            'เงิน',
+            'ทองแดง',
+            'medal',
+            'olympic',
+            'sport',
+            'athlete',
+            'country',
+        ],
+        sales: [
+            'ขาย',
+            'รายได้',
+            'ลูกค้า',
+            'สินค้า',
+            'การขาย',
+            'sale',
+            'revenue',
+            'customer',
+            'product',
+        ],
         employee: ['พนักงาน', 'ลูกค้า', 'เงินเดือน', 'แผนก', 'employee', 'salary', 'department'],
         order: ['สั่งซื้อ', 'คำสั่งซื้อ', 'ออเดอร์', 'order', 'purchase'],
-        user: ['ผู้ใช้', 'สมาชิก', 'user', 'member', 'account']
+        user: ['ผู้ใช้', 'สมาชิก', 'user', 'member', 'account'],
     };
     // Score each table based on keywords and table name
-    const tableScores = availableTables.map(table => {
+    const tableScores = availableTables.map((table) => {
         let score = 0;
         const tableName = table.name.toLowerCase();
         const tableComment = (table.comment || '').toLowerCase();
         // Check if query keywords match table name or comment
         for (const [category, keywords] of Object.entries(tableKeywords)) {
-            const keywordMatches = keywords.filter(keyword => query.includes(keyword) && (tableName.includes(category) || tableComment.includes(keyword))).length;
+            const keywordMatches = keywords.filter((keyword) => query.includes(keyword) &&
+                (tableName.includes(category) || tableComment.includes(keyword))).length;
             score += keywordMatches * 10;
         }
         // Direct table name match
@@ -81,24 +106,29 @@ async function detectBestTable(userQuery, availableTables) {
     // Sort by score and return best match
     tableScores.sort((a, b) => b.score - a.score);
     // If no good match found, return first table or fallback
-    return tableScores[0]?.table || availableTables[0] || { name: 'olympic_medalists', comment: 'Fallback table' };
+    return (tableScores[0]?.table ||
+        availableTables[0] || { name: 'olympic_medalists', comment: 'Fallback table' });
 }
 // Function to get sample data for AI learning (dynamic for any table)
 async function getSampleData(tableName, availableColumns, limit = 10) {
     let connection;
     try {
         connection = await mysql.createConnection(dbConfig);
-        // Get sample records
-        const [sampleRows] = await connection.execute(`SELECT * FROM ${tableName} LIMIT ?`, [limit]);
+        // Ensure limit is a safe integer to prevent SQL injection
+        const safeLimit = Math.max(1, Math.min(100, Math.floor(limit))); // Clamp between 1 and 100
+        // Get sample records - use string interpolation for LIMIT as MySQL doesn't support parameter placeholders for LIMIT
+        const [sampleRows] = await connection.execute(`SELECT * FROM ${tableName} LIMIT ${safeLimit}`);
         // Dynamically get distinct values for categorical columns
         const distinctValues = {};
         // Filter categorical columns (text-based and groupable)
-        const categoricalColumns = availableColumns.filter(col => col.canBeGrouped && col.isText && !col.name.includes('id')).slice(0, 5); // Limit to 5 columns to avoid too many queries
+        const categoricalColumns = availableColumns
+            .filter((col) => col.canBeGrouped && col.isText && !col.name.includes('id'))
+            .slice(0, 5); // Limit to 5 columns to avoid too many queries
         // Get distinct values for each categorical column
         for (const col of categoricalColumns) {
             try {
                 const [distinctRows] = await connection.execute(`SELECT DISTINCT ${col.name} FROM ${tableName} WHERE ${col.name} IS NOT NULL LIMIT 5`);
-                distinctValues[col.name] = distinctRows.map(row => row[col.name]);
+                distinctValues[col.name] = distinctRows.map((row) => row[col.name]);
             }
             catch (error) {
                 console.warn(`Could not get distinct values for column ${col.name}:`, error);
@@ -108,8 +138,8 @@ async function getSampleData(tableName, availableColumns, limit = 10) {
         return {
             sampleRecords: sampleRows,
             distinctValues,
-            categoricalColumns: categoricalColumns.map(col => col.name),
-            totalSampleCount: sampleRows.length
+            categoricalColumns: categoricalColumns.map((col) => col.name),
+            totalSampleCount: sampleRows.length,
         };
     }
     catch (error) {
@@ -117,10 +147,10 @@ async function getSampleData(tableName, availableColumns, limit = 10) {
         return {
             sampleRecords: [],
             distinctValues: {
-                fallback: ['Sample1', 'Sample2', 'Sample3']
+                fallback: ['Sample1', 'Sample2', 'Sample3'],
             },
             categoricalColumns: ['fallback'],
-            totalSampleCount: 0
+            totalSampleCount: 0,
         };
     }
     finally {
@@ -184,10 +214,17 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
   ${columnsInfo}
 
   ตัวอย่างข้อมูลจริงในตาราง (${sampleData.totalSampleCount} รายการ):
-  ${sampleData.sampleRecords.slice(0, 3).map((record, index) => `Record ${index + 1}: ${Object.entries(record).map(([key, value]) => `${key}="${value}"`).join(', ')}`).join('\n  ')}
+  ${sampleData.sampleRecords
+        .slice(0, 3)
+        .map((record, index) => `Record ${index + 1}: ${Object.entries(record)
+        .map(([key, value]) => `${key}="${value}"`)
+        .join(', ')}`)
+        .join('\n  ')}
 
   ค่า Distinct ในแต่ละ column สำคัญ:
-  ${Object.entries(sampleData.distinctValues).map(([columnName, values]) => `- ${columnName}: ${Array.isArray(values) ? values.slice(0, 5).join(', ') : 'N/A'}${Array.isArray(values) && values.length > 5 ? '...' : ''}`).join('\n  ')}
+  ${Object.entries(sampleData.distinctValues)
+        .map(([columnName, values]) => `- ${columnName}: ${Array.isArray(values) ? values.slice(0, 5).join(', ') : 'N/A'}${Array.isArray(values) && values.length > 5 ? '...' : ''}`)
+        .join('\n  ')}
 
   Categorical Columns ที่พร้อมใช้งาน: ${sampleData.categoricalColumns.join(', ')}
 
@@ -228,12 +265,15 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
   - **LIMIT**: ปรับตาม chart type และข้อมูล (10-50 รายการ)
   
   ## ตัวอย่างการใช้ข้อมูลจริงในการสร้าง WHERE clause:
-  ${Object.entries(sampleData.distinctValues).map(([columnName, values]) => {
+  ${Object.entries(sampleData.distinctValues)
+        .map(([columnName, values]) => {
         if (!Array.isArray(values) || values.length === 0)
             return '';
         const examples = values.slice(0, 2);
         return `- ถ้าหา "${examples[0]}" → WHERE ${columnName} = '${examples[0]}'${examples[1] ? ` หรือ WHERE ${columnName} = '${examples[1]}'` : ''}`;
-    }).filter(Boolean).join('\n  ')}
+    })
+        .filter(Boolean)
+        .join('\n  ')}
   - ถ้าหาช่วงปีหรือตัวเลข → WHERE column_name BETWEEN value1 AND value2
   - ถ้าหาหลายเงื่อนไข → WHERE condition1 AND condition2
 
@@ -309,6 +349,284 @@ async function executeQuery(sqlQuery, params = []) {
     finally {
         if (connection) {
             await connection.end();
+        }
+    }
+}
+// Function to verify query results with AI analysis
+async function verifyQueryResultsWithAI(originalPrompt, sqlQuery, queryResults, columnAnalysis, availableColumns, tableName) {
+    const verificationModel = new ChatGoogleGenerativeAI({
+        model: 'gemini-1.5-flash',
+        apiKey: process.env.GEMINI_API_KEY,
+        temperature: 0.1,
+    });
+    const verificationPrompt = `
+  ตรวจสอบความถูกต้องของผลลัพธ์ SQL Query ต่อไปนี้:
+
+  คำถามต้นฉบับของผู้ใช้: "${originalPrompt}"
+  
+  SQL Query ที่สร้าง: 
+  ${sqlQuery}
+  
+  ผลลัพธ์ที่ได้ (${queryResults.length} รายการ):
+  ${queryResults
+        .slice(0, 10)
+        .map((row, index) => `${index + 1}. ${Object.entries(row)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join(', ')}`)
+        .join('\n')}
+  ${queryResults.length > 10 ? `... และอีก ${queryResults.length - 10} รายการ` : ''}
+
+  การวิเคราะห์เดิม:
+  - Chart type: ${columnAnalysis.chart_type}
+  - Columns ที่ใช้: ${columnAnalysis.required_columns?.join(', ')}
+  - X axis: ${columnAnalysis.x_axis}
+  - Y axis: ${columnAnalysis.y_axis}
+
+  Columns ที่มีในตาราง ${tableName}:
+  ${availableColumns
+        .map((col) => `- ${col.name} (${col.type}): ${col.comment || 'ไม่มีคำอธิบาย'}`)
+        .join('\n')}
+
+  วิเคราะห์และตรวจสอบ:
+  1. ผลลัพธ์ตรงกับคำถามของผู้ใช้หรือไม่?
+  2. SQL Query เหมาะสมและถูกต้องหรือไม่?
+  3. ข้อมูลที่ได้มีความหมายและใช้งานได้หรือไม่?
+  4. จำนวนผลลัพธ์เหมาะสมหรือไม่ (ไม่น้อยเกินไป ไม่มากเกินไป)?
+  5. Chart type ที่เลือกเหมาะสมกับข้อมูลหรือไม่?
+
+  ตอบกลับเป็น JSON object เท่านั้น:
+  {
+    "is_valid": true/false,
+    "confidence_score": 0-100,
+    "issues_found": ["รายการปัญหาที่พบ"],
+    "suggestions": ["คำแนะนำในการปรับปรุง"],
+    "should_retry": true/false,
+    "improved_sql": "SQL query ที่ปรับปรุงแล้ว (ถ้ามี)",
+    "reasoning": "เหตุผลในการตัดสินใจ",
+    "data_quality": {
+      "completeness": "การประเมินความครบถ้วน",
+      "relevance": "การประเมินความเกี่ยวข้อง",
+      "accuracy": "การประเมินความถูกต้อง"
+    }
+  }
+  `;
+    try {
+        const verificationResult = await verificationModel.invoke(verificationPrompt);
+        // แปลง content เป็น string และหา JSON
+        const contentString = typeof verificationResult.content === 'string'
+            ? verificationResult.content
+            : JSON.stringify(verificationResult.content);
+        const jsonMatch = contentString.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            return {
+                isValid: parsed.is_valid || false,
+                confidenceScore: parsed.confidence_score || 0,
+                issuesFound: parsed.issues_found || [],
+                suggestions: parsed.suggestions || [],
+                shouldRetry: parsed.should_retry || false,
+                improvedSql: parsed.improved_sql || null,
+                reasoning: parsed.reasoning || '',
+                dataQuality: parsed.data_quality || {
+                    completeness: 'ไม่ทราบ',
+                    relevance: 'ไม่ทราบ',
+                    accuracy: 'ไม่ทราบ',
+                },
+            };
+        }
+    }
+    catch (error) {
+        console.error('Error in AI verification:', error);
+    }
+    // Fallback verification - basic checks
+    return {
+        isValid: queryResults.length > 0,
+        confidenceScore: queryResults.length > 0 ? 70 : 30,
+        issuesFound: queryResults.length === 0 ? ['ไม่พบข้อมูล'] : [],
+        suggestions: queryResults.length === 0 ? ['ลองปรับเงื่อนไข WHERE หรือเปลี่ยน table'] : [],
+        shouldRetry: queryResults.length === 0,
+        improvedSql: null,
+        reasoning: 'การตรวจสอบพื้นฐาน - AI verification ล้มเหลว',
+        dataQuality: {
+            completeness: queryResults.length > 0 ? 'ดี' : 'ต่ำ',
+            relevance: 'ไม่ทราบ',
+            accuracy: 'ไม่ทราบ',
+        },
+    };
+}
+// Function to improve and clarify user prompt using AI
+async function improveUserPrompt(originalPrompt, availableColumns, availableTables, tableName) {
+    const promptImprovementModel = new ChatGoogleGenerativeAI({
+        model: 'gemini-1.5-flash',
+        apiKey: process.env.GEMINI_API_KEY,
+        temperature: 0.1,
+    });
+    // สร้างข้อมูลบริบทสำหรับการปรับปรุง prompt
+    const contextInfo = `
+  ตาราง: ${tableName}
+  Columns ที่มี: ${availableColumns.map(col => `${col.name} (${col.type})`).join(', ')}
+  Tables ทั้งหมดในระบบ: ${availableTables.map(table => table.name).join(', ')}
+  
+  ประเภทข้อมูลหลัก:
+  - Categorical: ${availableColumns.filter(col => col.canBeGrouped && col.isText).map(col => col.name).join(', ')}
+  - Numeric: ${availableColumns.filter(col => col.isNumeric).map(col => col.name).join(', ')}
+  - Date/Time: ${availableColumns.filter(col => col.isDate).map(col => col.name).join(', ')}
+  `;
+    const improvementPrompt = `
+  ช่วยปรับปรุงและทำให้คำถามของผู้ใช้ชัดเจนขึ้น เพื่อให้ AI สามารถสร้าง SQL และกราฟได้ตรงตามความต้องการมากขึ้น:
+
+  คำถามต้นฉบับ: "${originalPrompt}"
+
+  ข้อมูลบริบท:
+  ${contextInfo}
+
+  เป้าหมายการปรับปรุง:
+  1. ระบุประเภทกราฟที่ต้องการ (ถ้าไม่ชัดเจน)
+  2. ชี้แจงข้อมูลที่ต้องการวิเคราะห์
+  3. เพิ่มรายละเอียดการกรองข้อมูล (filters)
+  4. ระบุช่วงเวลา หรือเงื่อนไขเฉพาะ
+  5. ปรับให้เหมาะสมกับข้อมูลที่มีอยู่จริง
+
+  หลักการปรับปรุง:
+  - เก็บความหมายเดิมของคำถาม
+  - เพิ่มความชัดเจนและรายละเอียด
+  - ใช้ศัพท์ที่ตรงกับ columns ที่มีอยู่
+  - แนะนำประเภทกราฟที่เหมาะสม
+  - เพิ่ม context ที่จำเป็น
+
+  ตัวอย่างการปรับปรุง:
+  - "เหรียญของไทย" → "แสดงจำนวนเหรียญทั้งหมดของประเทศไทย แยกตามประเภทเหรียญ (ทอง, เงิน, ทองแดง) ในรูปแบบกราฟแท่ง"
+  - "กีฬาแต่ละปี" → "แสดงจำนวนเหรียญในแต่ละกีฬาตลอดปี 2020-2024 ในรูปแบบกราฟเส้น"
+  - "เปรียบเทียบประเทศ" → "เปรียบเทียบจำนวนเหรียญรวมของ 10 ประเทศที่ได้เหรียญมากที่สุด ในรูปแบบกราฟแท่ง"
+
+  ตอบกลับเป็น JSON object เท่านั้น:
+  {
+    "improved_prompt": "คำถามที่ปรับปรุงแล้ว",
+    "improvements_made": ["รายการการปรับปรุงที่ทำ"],
+    "suggested_chart_type": "ประเภทกราฟที่แนะนำ",
+    "key_insights": "ข้อมูลเชิงลึกที่คาดว่าจะได้",
+    "data_focus": "จุดเน้นของข้อมูลที่จะวิเคราะห์",
+    "filter_suggestions": ["เงื่อนไขการกรองที่แนะนำ"],
+    "reasoning": "เหตุผลในการปรับปรุง"
+  }
+  `;
+    try {
+        const improvementResult = await promptImprovementModel.invoke(improvementPrompt);
+        // แปลง content เป็น string และหา JSON
+        const contentString = typeof improvementResult.content === 'string'
+            ? improvementResult.content
+            : JSON.stringify(improvementResult.content);
+        const jsonMatch = contentString.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            return {
+                improvedPrompt: parsed.improved_prompt || originalPrompt,
+                improvementsMade: parsed.improvements_made || [],
+                suggestedChartType: parsed.suggested_chart_type || null,
+                keyInsights: parsed.key_insights || '',
+                dataFocus: parsed.data_focus || '',
+                filterSuggestions: parsed.filter_suggestions || [],
+                reasoning: parsed.reasoning || '',
+                wasImproved: parsed.improved_prompt !== originalPrompt
+            };
+        }
+    }
+    catch (error) {
+        console.error('Error improving user prompt:', error);
+    }
+    // Fallback - return original prompt with basic improvements
+    return {
+        improvedPrompt: originalPrompt,
+        improvementsMade: ['ไม่สามารถปรับปรุงได้ - ใช้ prompt เดิม'],
+        suggestedChartType: null,
+        keyInsights: 'ไม่สามารถวิเคราะห์ได้',
+        dataFocus: 'ข้อมูลทั่วไป',
+        filterSuggestions: [],
+        reasoning: 'AI improvement ล้มเหลว',
+        wasImproved: false
+    };
+}
+// Function to execute query with AI verification and retry logic
+async function executeQueryWithRetry(originalPrompt, columnAnalysis, availableColumns, sampleData, tableName, maxRetries = 2) {
+    let attempt = 0;
+    let lastResult = null;
+    let lastError = null;
+    let currentSqlData = null;
+    while (attempt <= maxRetries) {
+        try {
+            // Generate SQL query
+            if (attempt === 0) {
+                // First attempt - use original analysis
+                currentSqlData = await generateSQLQueryWithAI(columnAnalysis, originalPrompt, availableColumns, sampleData, tableName);
+            }
+            else {
+                // Retry attempt - include feedback from previous verification
+                const retryPrompt = `
+        ${originalPrompt}
+        
+        RETRY ${attempt}/${maxRetries}:
+        ปัญหาจากครั้งก่อน: ${lastResult?.verification?.issuesFound?.join(', ') || 'ผลลัพธ์ไม่เหมาะสม'}
+        คำแนะนำ: ${lastResult?.verification?.suggestions?.join(', ') || 'ไม่มี'}
+        ${lastResult?.verification?.improvedSql
+                    ? `SQL ที่แนะนำ: ${lastResult.verification.improvedSql}`
+                    : ''}
+        `;
+                currentSqlData = await generateSQLQueryWithAI(columnAnalysis, retryPrompt, availableColumns, sampleData, tableName);
+            }
+            // Execute the SQL query
+            const queryResults = await executeQuery(currentSqlData.sqlQuery);
+            // Verify results with AI
+            const verification = await verifyQueryResultsWithAI(originalPrompt, currentSqlData.sqlQuery, queryResults, columnAnalysis, availableColumns, tableName);
+            const result = {
+                success: true,
+                queryResults,
+                sqlData: currentSqlData,
+                verification,
+                attempt: attempt + 1,
+                maxRetries,
+            };
+            // Check if result is acceptable
+            if (verification.isValid && verification.confidenceScore >= 70) {
+                return result;
+            }
+            // If not valid and we should retry
+            if (verification.shouldRetry && attempt < maxRetries) {
+                lastResult = result;
+                attempt++;
+                continue;
+            }
+            // Return current result even if not perfect
+            return result;
+        }
+        catch (error) {
+            lastError = error;
+            console.error(`Query execution attempt ${attempt + 1} failed:`, error);
+            if (attempt < maxRetries) {
+                attempt++;
+                continue;
+            }
+            // All attempts failed, return error result
+            return {
+                success: false,
+                queryResults: [],
+                sqlData: currentSqlData || {
+                    sqlQuery: 'SELECT "Error" as message',
+                    explanation: 'เกิดข้อผิดพลาดในการสร้าง SQL',
+                },
+                verification: {
+                    isValid: false,
+                    confidenceScore: 0,
+                    issuesFound: [
+                        `เกิดข้อผิดพลาด: ${lastError instanceof Error ? lastError.message : 'Unknown error'}`,
+                    ],
+                    suggestions: ['ลองเปลี่ยนคำถามหรือตรวจสอบข้อมูล'],
+                    shouldRetry: false,
+                    reasoning: 'เกิดข้อผิดพลาดในการ execute query หลายครั้ง',
+                },
+                attempt: attempt + 1,
+                maxRetries,
+                error: lastError,
+            };
         }
     }
 }
@@ -513,442 +831,6 @@ app.use('/*', cors({
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'Accept'],
 }));
-app.get('/', (c) => {
-    return c.html(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>SSE Test</title>
-        <meta charset="UTF-8">
-        <style>
-            body { font-family: Arial, sans-serif; margin: 20px; }
-            .container { max-width: 800px; margin: 0 auto; }
-            textarea { width: 100%; height: 100px; margin: 10px 0; }
-            button { padding: 10px 20px; background: #007bff; color: white; border: none; cursor: pointer; }
-            button:disabled { background: #ccc; cursor: not-allowed; }
-            .output { border: 1px solid #ccc; padding: 10px; margin: 10px 0; height: 300px; overflow-y: scroll; }
-            .message { margin: 5px 0; padding: 5px; }
-            .status { background: #e7f3ff; }
-            .result { background: #e7ffe7; }
-            .error { background: #ffe7e7; }
-            .progress { width: 100%; height: 20px; margin: 10px 0; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Server-Sent Events Test</h1>
-            <textarea id="query" placeholder="ใส่คำถามของคุณที่นี่... เช่น:
-- แสดงจำนวนเหรียญทองของประเทศไทย (bar chart)
-- เปรียบเทียบเหรียญของประเทศต่างๆ ในปี 2024 (column chart)
-- แสดงการเปลี่ยนแปลงเหรียญทองของ USA ตลอดเวลา (line chart)
-- แสดงสัดส่วนเหรียญทอง เงิน ทองแดงของไทย (pie chart)
-- แสดงการกระจายของอายุนักกีฬา (histogram)
-- แสดงกีฬาที่ไทยได้เหรียญมากที่สุด (bar chart)">แสดงจำนวนเหรียญทองของประเทศไทย</textarea><br>
-            <button id="sendBtn" onclick="sendQuery()">ส่งคำถาม (AI Analysis)</button>
-            <button id="testBtn" onclick="testStream()">ทดสอบ SSE</button>
-            <button id="tablesBtn" onclick="loadTables()">ดู Tables</button>
-            <button id="columnsBtn" onclick="loadColumns()">ดู Columns</button>
-            <button id="testDbBtn" onclick="testDatabase()">ทดสอบ DB</button>
-            <button id="clearBtn" onclick="clearOutput()">ล้างผลลัพธ์</button>
-            
-            <progress id="progress" class="progress" value="0" max="100"></progress>
-            <div id="output" class="output"></div>
-        </div>
-
-        <script>
-            let eventSource = null;
-            
-            function sendQuery() {
-                const query = document.getElementById('query').value;
-                const output = document.getElementById('output');
-                const sendBtn = document.getElementById('sendBtn');
-                const progress = document.getElementById('progress');
-                
-                if (!query.trim()) {
-                    alert('กรุณาใส่คำถาม');
-                    return;
-                }
-                
-                sendBtn.disabled = true;
-                progress.value = 0;
-                
-                // ปิด connection เก่าถ้ามี
-                if (eventSource) {
-                    eventSource.close();
-                }
-                
-                // ส่ง request ไปที่ API
-                fetch('/api/query-stream', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ query: query })
-                })
-                .then(response => {
-                    if (!response.ok) throw new Error('Network response was not ok');
-                    
-                    const reader = response.body.getReader();
-                    const decoder = new TextDecoder();
-                    
-                    function readStream() {
-                        return reader.read().then(({ done, value }) => {
-                            if (done) {
-                                sendBtn.disabled = false;
-                                return;
-                            }
-                            
-                            const chunk = decoder.decode(value);
-                            const lines = chunk.split('\\n');
-                            
-                            lines.forEach(line => {
-                                if (line.startsWith('data: ')) {
-                                    try {
-                                        const data = JSON.parse(line.substring(6));
-                                        handleSSEMessage(data);
-                                    } catch (e) {
-                                        console.error('Error parsing SSE data:', e);
-                                    }
-                                }
-                            });
-                            
-                            return readStream();
-                        });
-                    }
-                    
-                    return readStream();
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    addMessage('เกิดข้อผิดพลาด: ' + error.message, 'error');
-                    sendBtn.disabled = false;
-                });
-            }
-            
-            function handleSSEMessage(data) {
-                const output = document.getElementById('output');
-                const progress = document.getElementById('progress');
-                
-                if (data.progress) {
-                    progress.value = data.progress;
-                }
-                
-                switch (data.type) {
-                    case 'status':
-                        addMessage(data.message, 'status');
-                        break;
-                    case 'result':
-                        addMessage('✅ ' + data.message, 'result');
-                        if (data.column_analysis) {
-                            addMessage('📊 การวิเคราะห์: ' + data.column_analysis.analysis, 'result');
-                            addMessage('🔍 Columns ที่ใช้: ' + data.column_analysis.required_columns.join(', '), 'result');
-                            addMessage('📈 ประเภทกราฟหลัก: ' + data.column_analysis.chart_type, 'result');
-                            if (data.column_analysis.alternative_charts && data.column_analysis.alternative_charts.length > 0) {
-                                addMessage('📊 กราฟทางเลือก: ' + data.column_analysis.alternative_charts.join(', '), 'result');
-                            }
-                            if (data.column_analysis.chart_reasoning) {
-                                addMessage('💡 เหตุผล: ' + data.column_analysis.chart_reasoning, 'result');
-                            }
-                            if (data.column_analysis.x_axis && data.column_analysis.y_axis) {
-                                addMessage('📐 แกน X: ' + data.column_analysis.x_axis + ', แกน Y: ' + data.column_analysis.y_axis, 'result');
-                            }
-                        if (data.column_analysis.column_reasoning) {
-                            addMessage('🔧 Column Reasoning: ' + data.column_analysis.column_reasoning, 'result');
-                        }
-                        if (data.column_analysis.suggested_filters && data.column_analysis.suggested_filters.length > 0) {
-                            addMessage('🎯 Suggested Filters: ' + data.column_analysis.suggested_filters.join(', '), 'result');
-                        }
-                        }
-                        if (data.result.metadata && data.result.metadata.database_info) {
-                            addMessage('🗄️ Database: เชื่อมต่อสำเร็จ, มี ' + data.result.metadata.database_info.total_columns + ' columns', 'result');
-                        }
-                        if (data.result.metadata && data.result.metadata.sql_query) {
-                            addMessage('📝 SQL Query: ' + data.result.metadata.sql_query.replace(/\s+/g, ' ').trim(), 'result');
-                        }
-                        if (data.result.metadata && data.result.metadata.sql_explanation) {
-                            addMessage('💭 SQL Explanation: ' + data.result.metadata.sql_explanation, 'result');
-                        }
-                        if (data.result.metadata && data.result.metadata.sql_reasoning) {
-                            addMessage('🔍 SQL Reasoning: ' + data.result.metadata.sql_reasoning, 'result');
-                        }
-                        if (data.result.metadata && data.result.metadata.columns_used) {
-                            addMessage('📊 Columns Used: ' + data.result.metadata.columns_used.join(', '), 'result');
-                        }
-                        if (data.result.metadata && data.result.metadata.filters_applied && data.result.metadata.filters_applied.length > 0) {
-                            addMessage('🔎 Filters Applied: ' + data.result.metadata.filters_applied.join(', '), 'result');
-                        }
-                        if (data.result.metadata && data.result.metadata.chart_suitability) {
-                            addMessage('📈 Chart Suitability: ' + data.result.metadata.chart_suitability, 'result');
-                        }
-                        if (data.result.metadata && data.result.metadata.query_execution) {
-                            const exec = data.result.metadata.query_execution;
-                            if (exec.success) {
-                                addMessage('✅ Query สำเร็จ: ได้ข้อมูล ' + exec.rows_returned + ' รายการ', 'result');
-                            } else {
-                                addMessage('❌ Query ไม่สำเร็จ: ' + exec.error, 'error');
-                            }
-                        }
-                        addMessage('ผลลัพธ์: ' + JSON.stringify(data.result, null, 2), 'result');
-                        break;
-                    case 'error':
-                        addMessage('❌ ' + data.message + ': ' + data.error, 'error');
-                        break;
-                    case 'done':
-                        addMessage('🎉 เสร็จสิ้นแล้ว!', 'result');
-                        document.getElementById('sendBtn').disabled = false;
-                        break;
-                }
-                
-                output.scrollTop = output.scrollHeight;
-            }
-            
-            function addMessage(message, type) {
-                const output = document.getElementById('output');
-                const div = document.createElement('div');
-                div.className = 'message ' + type;
-                div.textContent = new Date().toLocaleTimeString() + ': ' + message;
-                output.appendChild(div);
-            }
-            
-            function clearOutput() {
-                document.getElementById('output').innerHTML = '';
-                document.getElementById('progress').value = 0;
-            }
-            
-            function testStream() {
-                const output = document.getElementById('output');
-                const testBtn = document.getElementById('testBtn');
-                const progress = document.getElementById('progress');
-                
-                testBtn.disabled = true;
-                progress.value = 0;
-                
-                fetch('/api/test-stream')
-                .then(response => {
-                    if (!response.ok) throw new Error('Network response was not ok');
-                    
-                    const reader = response.body.getReader();
-                    const decoder = new TextDecoder();
-                    
-                    function readStream() {
-                        return reader.read().then(({ done, value }) => {
-                            if (done) {
-                                testBtn.disabled = false;
-                                return;
-                            }
-                            
-                            const chunk = decoder.decode(value);
-                            const lines = chunk.split('\\n');
-                            
-                            lines.forEach(line => {
-                                if (line.startsWith('data: ')) {
-                                    try {
-                                        const data = JSON.parse(line.substring(6));
-                                        handleSSEMessage(data);
-                                    } catch (e) {
-                                        console.error('Error parsing SSE data:', e);
-                                    }
-                                }
-                            });
-                            
-                            return readStream();
-                        });
-                    }
-                    
-                    return readStream();
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    addMessage('เกิดข้อผิดพลาด: ' + error.message, 'error');
-                    testBtn.disabled = false;
-                });
-            }
-            
-            function loadTables() {
-                const tablesBtn = document.getElementById('tablesBtn');
-                tablesBtn.disabled = true;
-                
-                fetch('/api/tables')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        addMessage('🗂️ Tables ที่มีในฐานข้อมูล:', 'result');
-                        data.tables.forEach((table, index) => {
-                            addMessage((index + 1) + '. ' + table.name + ': ' + (table.comment || 'ไม่มีคำอธิบาย'), 'result');
-                        });
-                        addMessage('รวม ' + data.total + ' tables', 'result');
-                    } else {
-                        addMessage('❌ ไม่สามารถโหลด tables ได้: ' + data.error, 'error');
-                    }
-                    tablesBtn.disabled = false;
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    addMessage('เกิดข้อผิดพลาด: ' + error.message, 'error');
-                    tablesBtn.disabled = false;
-                });
-            }
-            
-            function loadColumns() {
-                const columnsBtn = document.getElementById('columnsBtn');
-                columnsBtn.disabled = true;
-                
-                fetch('/api/columns')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        addMessage('📋 Columns ในตาราง ' + data.table + ':', 'result');
-                        data.columns.forEach((col, index) => {
-                            addMessage((index + 1) + '. ' + col.name + ' (' + col.type + '): ' + (col.comment || 'ไม่มีคำอธิบาย'), 'result');
-                        });
-                        addMessage('รวม ' + data.total + ' columns', 'result');
-                        if (data.available_tables && data.available_tables.length > 0) {
-                            addMessage('📋 Tables อื่นๆ ที่มี: ' + data.available_tables.map(t => t.name).join(', '), 'result');
-                        }
-                    } else {
-                        addMessage('❌ ไม่สามารถโหลด columns ได้: ' + data.error, 'error');
-                    }
-                    columnsBtn.disabled = false;
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    addMessage('เกิดข้อผิดพลาด: ' + error.message, 'error');
-                    columnsBtn.disabled = false;
-                });
-            }
-            
-            function testDatabase() {
-                const testDbBtn = document.getElementById('testDbBtn');
-                testDbBtn.disabled = true;
-                
-                fetch('/api/test-db')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        addMessage('✅ ' + data.message, 'result');
-                        addMessage('🔧 Database: ' + data.config.host + ':' + data.config.port + '/' + data.config.database, 'result');
-                    } else {
-                        addMessage('❌ ' + data.message + ': ' + data.error, 'error');
-                    }
-                    testDbBtn.disabled = false;
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    addMessage('เกิดข้อผิดพลาด: ' + error.message, 'error');
-                    testDbBtn.disabled = false;
-                });
-            }
-        </script>
-    </body>
-    </html>
-  `);
-});
-// API สำหรับทดสอบ SQL query
-app.post('/api/test-query', async (c) => {
-    try {
-        const body = await c.req.json();
-        const { query } = body;
-        if (!query) {
-            return c.json({ success: false, error: 'Query is required' }, 400);
-        }
-        const result = await executeQuery(query);
-        return c.json({
-            success: true,
-            query: query,
-            result: result,
-            rows_count: result.length,
-        });
-    }
-    catch (error) {
-        return c.json({
-            success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
-        }, 500);
-    }
-});
-// API สำหรับทดสอบการเชื่อมต่อฐานข้อมูล
-app.get('/api/test-db', async (c) => {
-    try {
-        const connection = await mysql.createConnection(dbConfig);
-        await connection.execute('SELECT 1 as test');
-        await connection.end();
-        return c.json({
-            success: true,
-            message: 'เชื่อมต่อฐานข้อมูลสำเร็จ',
-            config: {
-                host: dbConfig.host,
-                port: dbConfig.port,
-                database: dbConfig.database,
-                user: dbConfig.user,
-            },
-        });
-    }
-    catch (error) {
-        return c.json({
-            success: false,
-            message: 'ไม่สามารถเชื่อมต่อฐานข้อมูลได้',
-            error: error instanceof Error ? error.message : 'Unknown error',
-        }, 500);
-    }
-});
-// API สำหรับดู tables ที่มีอยู่
-app.get('/api/tables', async (c) => {
-    try {
-        const tables = await getAvailableTables();
-        return c.json({
-            success: true,
-            tables: tables,
-            total: tables.length,
-        });
-    }
-    catch (error) {
-        return c.json({
-            success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
-        }, 500);
-    }
-});
-// API สำหรับดู columns ของ table ที่ระบุ
-app.get('/api/columns/:tableName', async (c) => {
-    try {
-        const tableName = c.req.param('tableName');
-        const columns = await getAvailableColumns(tableName);
-        return c.json({
-            success: true,
-            table: tableName,
-            columns: columns,
-            total: columns.length,
-        });
-    }
-    catch (error) {
-        return c.json({
-            success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
-        }, 500);
-    }
-});
-// API สำหรับดู columns ที่มีอยู่
-app.get('/api/columns', async (c) => {
-    try {
-        // Get tables first, then use first available table or default
-        const tables = await getAvailableTables();
-        const tableName = tables.length > 0 ? tables[0].name : 'information_schema.tables';
-        const columns = await getAvailableColumns(tableName);
-        return c.json({
-            success: true,
-            table: tableName,
-            columns: columns,
-            total: columns.length,
-            available_tables: tables,
-        });
-    }
-    catch (error) {
-        return c.json({
-            success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
-        }, 500);
-    }
-});
 // API สำหรับ Server-Sent Events
 app.post('/api/query-stream', async (c) => {
     const body = await c.req.json();
@@ -993,6 +875,37 @@ app.post('/api/query-stream', async (c) => {
                 event: 'update',
             });
             const availableColumns = await getAvailableColumns(tableName);
+            // ปรับปรุง prompt ให้ชัดเจนขึ้น
+            await stream.writeSSE({
+                data: JSON.stringify({
+                    type: 'status',
+                    message: 'กำลังปรับปรุงคำถามให้ชัดเจนขึ้น...',
+                    progress: 59,
+                }),
+                event: 'update',
+            });
+            const promptImprovement = await improveUserPrompt(userQuery, availableColumns, availableTables, tableName);
+            const finalUserQuery = promptImprovement.improvedPrompt;
+            if (promptImprovement.wasImproved) {
+                await stream.writeSSE({
+                    data: JSON.stringify({
+                        type: 'status',
+                        message: `ปรับปรุงคำถาม: "${finalUserQuery.substring(0, 100)}${finalUserQuery.length > 100 ? '...' : ''}"`,
+                        progress: 60,
+                    }),
+                    event: 'update',
+                });
+            }
+            else {
+                await stream.writeSSE({
+                    data: JSON.stringify({
+                        type: 'status',
+                        message: 'คำถามชัดเจนแล้ว ไม่ต้องปรับปรุง',
+                        progress: 60,
+                    }),
+                    event: 'update',
+                });
+            }
             const databaseStatus = availableColumns.length > 0 && availableColumns[0].comment !== 'ไม่มีคำอธิบาย'
                 ? 'เชื่อมต่อฐานข้อมูลสำเร็จ'
                 : 'ใช้ข้อมูล fallback (ไม่สามารถเชื่อมต่อ DB)';
@@ -1033,8 +946,8 @@ app.post('/api/query-stream', async (c) => {
                 .filter((col) => col.canBeGrouped && !col.isDate)
                 .map((col) => col.name)
                 .join(', ');
-            // ตรวจสอบว่าผู้ใช้ระบุประเภท chart มาแล้วหรือไม่
-            const detectedChartType = detectChartTypeFromQuery(userQuery);
+            // ตรวจสอบว่าผู้ใช้ระบุประเภท chart มาแล้วหรือไม่ (ใช้ query ที่ปรับปรุงแล้ว)
+            const detectedChartType = detectChartTypeFromQuery(finalUserQuery);
             let columnAnalysis;
             if (detectedChartType) {
                 // ถ้าผู้ใช้ระบุ chart type มาแล้ว ข้าม AI analysis
@@ -1075,11 +988,16 @@ app.post('/api/query-stream', async (c) => {
                 });
             }
             else {
-                // วิเคราะห์ด้วย AI เหมือนเดิม
+                // วิเคราะห์ด้วย AI เหมือนเดิม (ใช้ query ที่ปรับปรุงแล้ว)
                 const columnAnalysisPrompt = `
       วิเคราะห์คำถามต่อไปนี้และระบุว่าต้องใช้ column ไหนจากข้อมูลและเลือก chart type ที่เหมาะสมที่สุด:
       
-      คำถาม: "${userQuery}"
+      คำถามต้นฉบับ: "${userQuery}"
+      คำถามที่ปรับปรุงแล้ว: "${finalUserQuery}"
+      
+      การปรับปรุงที่ทำ: ${promptImprovement.improvementsMade.join(', ')}
+      Chart type ที่แนะนำ: ${promptImprovement.suggestedChartType || 'ไม่มี'}
+      จุดเน้นข้อมูล: ${promptImprovement.dataFocus}
       
       Columns ที่มีในข้อมูล (พร้อม capabilities):
       ${columnsDescription}
@@ -1204,7 +1122,8 @@ app.post('/api/query-stream', async (c) => {
                 }),
                 event: 'update',
             });
-            const result = await generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumns, sampleData, tableName);
+            const result = await generateSQLQueryWithAI(columnAnalysis, finalUserQuery, // ใช้ query ที่ปรับปรุงแล้ว
+            availableColumns, sampleData, tableName);
             const { sqlQuery, explanation, queryReasoning, columnsUsed, filtersApplied, chartSuitability, sampleDataInsights, } = result;
             await stream.writeSSE({
                 data: JSON.stringify({
@@ -1222,35 +1141,53 @@ app.post('/api/query-stream', async (c) => {
                 }),
                 event: 'update',
             });
-            // Execute query และรับข้อมูลจริง
             await stream.writeSSE({
                 data: JSON.stringify({
                     type: 'status',
-                    message: 'กำลังดึงข้อมูลจากฐานข้อมูล...',
+                    message: 'กำลัง execute query พร้อมตรวจสอบผลลัพธ์ด้วย AI...',
                     progress: 85,
                 }),
                 event: 'update',
             });
+            // Execute query with AI verification and retry logic
+            const queryExecutionResult = await executeQueryWithRetry(finalUserQuery, // ใช้ query ที่ปรับปรุงแล้ว
+            columnAnalysis, availableColumns, sampleData, tableName, 2);
             let queryResult = [];
             let executionError = null;
-            try {
-                queryResult = await executeQuery(sqlQuery);
+            let verificationInfo = null;
+            if (queryExecutionResult && queryExecutionResult.success) {
+                queryResult = queryExecutionResult.queryResults;
+                verificationInfo = queryExecutionResult.verification;
                 await stream.writeSSE({
                     data: JSON.stringify({
                         type: 'status',
-                        message: `Query สำเร็จ! พบข้อมูล ${queryResult.length} รายการ`,
+                        message: `Query สำเร็จ! พบข้อมูล ${queryResult.length} รายการ (ความเชื่อมั่น: ${verificationInfo.confidenceScore}%)`,
                         progress: 90,
                     }),
                     event: 'update',
                 });
+                // Show retry info if applicable
+                if (queryExecutionResult.attempt > 1) {
+                    await stream.writeSSE({
+                        data: JSON.stringify({
+                            type: 'status',
+                            message: `ใช้ความพยายามครั้งที่ ${queryExecutionResult.attempt}/${queryExecutionResult.maxRetries} จึงได้ผลลัพธ์ที่เหมาะสม`,
+                            progress: 92,
+                        }),
+                        event: 'update',
+                    });
+                }
             }
-            catch (error) {
-                executionError = error;
-                console.error('Query execution failed:', error);
+            else {
+                // Handle error case
+                const errorResult = queryExecutionResult; // Type assertion for error case
+                executionError = errorResult?.error || new Error('Unknown execution error');
+                verificationInfo = errorResult?.verification;
+                console.error('Query execution failed after retries:', executionError);
                 await stream.writeSSE({
                     data: JSON.stringify({
                         type: 'status',
-                        message: 'Query ไม่สำเร็จ ใช้ข้อมูลจำลองแทน...',
+                        message: `Query ไม่สำเร็จหลังจากลองแล้ว ${errorResult?.attempt || 0} ครั้ง - ใช้ข้อมูลจำลองแทน`,
                         progress: 90,
                     }),
                     event: 'update',
@@ -1287,10 +1224,18 @@ app.post('/api/query-stream', async (c) => {
                 };
             });
             // Format data สำหรับ shadcn charts
-            const shadcnChartData = generateShadcnChartResponse(columnAnalysis.chart_type, chartData, `ผลลัพธ์สำหรับ: ${userQuery}`, {
-                columns_used: columnsUsed.length > 0 ? columnsUsed : columnAnalysis.required_columns,
+            // Get SQL info from result (either from retry or original)
+            const sqlInfo = queryExecutionResult?.sqlData || result;
+            const actualSqlQuery = sqlInfo.sqlQuery;
+            const actualExplanation = sqlInfo.explanation;
+            const actualQueryReasoning = sqlInfo.queryReasoning || queryReasoning || '';
+            const actualColumnsUsed = sqlInfo.columnsUsed || columnsUsed || [];
+            const actualFiltersApplied = sqlInfo.filtersApplied || filtersApplied || [];
+            const actualChartSuitability = sqlInfo.chartSuitability || chartSuitability || '';
+            const shadcnChartData = generateShadcnChartResponse(columnAnalysis.chart_type, chartData, `ผลลัพธ์สำหรับ: ${promptImprovement.wasImproved ? finalUserQuery : userQuery}`, {
+                columns_used: actualColumnsUsed.length > 0 ? actualColumnsUsed : columnAnalysis.required_columns,
                 aggregation_method: columnAnalysis.data_aggregation || 'count',
-                filters_applied: filtersApplied.length > 0 ? filtersApplied : [],
+                filters_applied: actualFiltersApplied.length > 0 ? actualFiltersApplied : [],
                 total_records: chartData.length,
                 data_range: executionError ? 'mock data (query failed)' : 'real data from database',
                 analysis: columnAnalysis.analysis,
@@ -1300,10 +1245,10 @@ app.post('/api/query-stream', async (c) => {
                     x_axis: columnAnalysis.x_axis,
                     y_axis: columnAnalysis.y_axis,
                 },
-                sql_query: sqlQuery,
-                sql_explanation: explanation,
-                sql_reasoning: queryReasoning,
-                chart_suitability: chartSuitability,
+                sql_query: actualSqlQuery,
+                sql_explanation: actualExplanation,
+                sql_reasoning: actualQueryReasoning,
+                chart_suitability: actualChartSuitability,
                 query_execution: {
                     success: !executionError,
                     error: executionError
@@ -1312,6 +1257,36 @@ app.post('/api/query-stream', async (c) => {
                             : 'Unknown error'
                         : null,
                     rows_returned: queryResult.length,
+                },
+                // Add AI verification info
+                ai_verification: verificationInfo
+                    ? {
+                        is_valid: verificationInfo.isValid,
+                        confidence_score: verificationInfo.confidenceScore,
+                        issues_found: verificationInfo.issuesFound,
+                        suggestions: verificationInfo.suggestions,
+                        data_quality: verificationInfo.dataQuality,
+                        reasoning: verificationInfo.reasoning,
+                    }
+                    : null,
+                retry_info: queryExecutionResult
+                    ? {
+                        attempts_made: queryExecutionResult.attempt,
+                        max_retries: queryExecutionResult.maxRetries,
+                        final_success: queryExecutionResult.success,
+                    }
+                    : null,
+                // Add prompt improvement info
+                prompt_improvement: {
+                    original_prompt: userQuery,
+                    improved_prompt: finalUserQuery,
+                    was_improved: promptImprovement.wasImproved,
+                    improvements_made: promptImprovement.improvementsMade,
+                    suggested_chart_type: promptImprovement.suggestedChartType,
+                    key_insights: promptImprovement.keyInsights,
+                    data_focus: promptImprovement.dataFocus,
+                    filter_suggestions: promptImprovement.filterSuggestions,
+                    reasoning: promptImprovement.reasoning
                 },
                 available_columns: availableColumns.map((col) => ({
                     name: col.name,
