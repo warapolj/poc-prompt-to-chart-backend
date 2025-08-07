@@ -400,7 +400,7 @@ function parseQueryResultToChartData(queryResult, columnAnalysis) {
         'frequency',
         'total',
         'percentage',
-        'ratio'
+        'ratio',
     ];
     return queryResult.map((row, index) => {
         const keys = Object.keys(row);
@@ -414,9 +414,7 @@ function parseQueryResultToChartData(queryResult, columnAnalysis) {
             // Second priority: legacy compatibility (for existing queries)
             keys.find((key) => {
                 const exactKey = key.toLowerCase();
-                return (exactKey === 'medal_count' ||
-                    exactKey === 'value' ||
-                    exactKey === 'y');
+                return exactKey === 'medal_count' || exactKey === 'value' || exactKey === 'y';
             }) ||
             // Third priority: pattern-based detection (fallback)
             keys.find((key) => {
@@ -464,12 +462,25 @@ function parseQueryResultToChartData(queryResult, columnAnalysis) {
 // Helper function to validate SQL aliases against standardized list
 function validateSQLAliases(sqlQuery) {
     const STANDARD_ALIASES = [
-        'count', 'sum', 'average', 'maximum', 'minimum',
-        'unique_count', 'frequency', 'total', 'percentage', 'ratio'
+        'count',
+        'sum',
+        'average',
+        'maximum',
+        'minimum',
+        'unique_count',
+        'frequency',
+        'total',
+        'percentage',
+        'ratio',
     ];
     const FORBIDDEN_ALIASES = [
-        'medal_count', 'total_medals', 'num_records', 'value_sum',
-        'medal_frequency', 'count_medals', 'sum_medals'
+        'medal_count',
+        'total_medals',
+        'num_records',
+        'value_sum',
+        'medal_frequency',
+        'count_medals',
+        'sum_medals',
     ];
     const issues = [];
     const suggestions = [];
@@ -502,7 +513,7 @@ function validateSQLAliases(sqlQuery) {
     return {
         isValid: issues.length === 0,
         issues,
-        suggestions
+        suggestions,
     };
 }
 // Function to execute SQL query
@@ -765,8 +776,18 @@ async function executeQueryWithRetry(originalPrompt, columnAnalysis, availableCo
                 attempt: attempt + 1,
                 maxRetries,
             };
-            // Check if result is acceptable
-            if (verification.isValid && verification.confidenceScore >= 70) {
+            // Enhanced confidence-based early return logic
+            const highConfidenceThreshold = 85; // High confidence - skip retries
+            const acceptableConfidenceThreshold = 70; // Acceptable confidence
+            // If high confidence, return immediately without retries
+            if (verification.isValid && verification.confidenceScore >= highConfidenceThreshold) {
+                return {
+                    ...result,
+                    skipReason: `High confidence (${verification.confidenceScore}%) - skipped retries`
+                };
+            }
+            // If acceptable confidence, return without retries
+            if (verification.isValid && verification.confidenceScore >= acceptableConfidenceThreshold) {
                 return result;
             }
             // If not valid and we should retry
@@ -1284,7 +1305,7 @@ app.post('/api/query-stream', async (c) => {
                 }),
                 event: 'update',
             });
-            const sampleData = await getSampleData(tableName, availableColumns, 10);
+            const sampleData = await getSampleData(tableName, availableColumns, 3);
             await stream.writeSSE({
                 data: JSON.stringify({
                     type: 'status',
@@ -1346,6 +1367,17 @@ app.post('/api/query-stream', async (c) => {
                     }),
                     event: 'update',
                 });
+                // Show skip reason if retries were skipped due to high confidence
+                if (queryExecutionResult.skipReason) {
+                    await stream.writeSSE({
+                        data: JSON.stringify({
+                            type: 'status',
+                            message: `✨ ${queryExecutionResult.skipReason} - ประหยัดเวลาการประมวลผล`,
+                            progress: 91,
+                        }),
+                        event: 'update',
+                    });
+                }
                 // Show retry info if applicable
                 if (queryExecutionResult.attempt > 1) {
                     await stream.writeSSE({

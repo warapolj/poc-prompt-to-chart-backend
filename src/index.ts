@@ -849,7 +849,8 @@ async function improveUserPrompt(
   }
 }
 
-// Function to execute query with AI verification and retry logic
+// Function to execute query with AI verification and smart retry logic
+// High confidence results (85%+) skip retries to save processing time
 async function executeQueryWithRetry(
   originalPrompt: string,
   columnAnalysis: any,
@@ -923,8 +924,20 @@ async function executeQueryWithRetry(
         maxRetries,
       }
 
-      // Check if result is acceptable
-      if (verification.isValid && verification.confidenceScore >= 70) {
+      // Enhanced confidence-based early return logic
+      const highConfidenceThreshold = 85 // High confidence - skip retries
+      const acceptableConfidenceThreshold = 70 // Acceptable confidence
+
+      // If high confidence, return immediately without retries
+      if (verification.isValid && verification.confidenceScore >= highConfidenceThreshold) {
+        return {
+          ...result,
+          skipReason: `High confidence (${verification.confidenceScore}%) - skipped retries`,
+        }
+      }
+
+      // If acceptable confidence, return without retries
+      if (verification.isValid && verification.confidenceScore >= acceptableConfidenceThreshold) {
         return result
       }
 
@@ -1523,7 +1536,7 @@ app.post('/api/query-stream', async (c: any) => {
         event: 'update',
       })
 
-      const sampleData = await getSampleData(tableName, availableColumns, 10)
+      const sampleData = await getSampleData(tableName, availableColumns, 3)
 
       await stream.writeSSE({
         data: JSON.stringify({
@@ -1615,6 +1628,18 @@ app.post('/api/query-stream', async (c: any) => {
           }),
           event: 'update',
         })
+
+        // Show skip reason if retries were skipped due to high confidence
+        if ((queryExecutionResult as any).skipReason) {
+          await stream.writeSSE({
+            data: JSON.stringify({
+              type: 'status',
+              message: `✨ ${(queryExecutionResult as any).skipReason} - ประหยัดเวลาการประมวลผล`,
+              progress: 91,
+            }),
+            event: 'update',
+          })
+        }
 
         // Show retry info if applicable
         if (queryExecutionResult.attempt > 1) {
