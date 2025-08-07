@@ -11,7 +11,7 @@ import { cors } from 'hono/cors';
 import mysql from 'mysql2/promise';
 import 'dotenv/config';
 // Import chart configuration
-import { formatDataForShadcn, generateShadcnChartResponse } from '../packages/chart-config.js';
+import { formatDataForShadcn, generateShadcnChartResponse, } from '../packages/chart-config.js';
 // Database configuration
 const dbConfig = {
     host: 'localhost',
@@ -20,8 +20,117 @@ const dbConfig = {
     password: 'poc_password',
     database: 'poc_chart_db',
 };
+// Function to get available tables in database
+async function getAvailableTables() {
+    let connection;
+    try {
+        connection = await mysql.createConnection(dbConfig);
+        const [tables] = await connection.execute(`SELECT TABLE_NAME as table_name, TABLE_COMMENT as table_comment 
+       FROM INFORMATION_SCHEMA.TABLES 
+       WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+       ORDER BY TABLE_NAME`, [dbConfig.database]);
+        return tables.map(table => ({
+            name: table.table_name,
+            comment: table.table_comment || 'ไม่มีคำอธิบาย'
+        }));
+    }
+    catch (error) {
+        console.error('Error getting available tables:', error);
+        return [{ name: 'olympic_medalists', comment: 'ข้อมูลเหรียญโอลิมปิก' }];
+    }
+    finally {
+        if (connection) {
+            await connection.end();
+        }
+    }
+}
+// Function to auto-detect best table for query
+async function detectBestTable(userQuery, availableTables) {
+    const query = userQuery.toLowerCase();
+    // Keywords mapping for different types of data
+    const tableKeywords = {
+        olympic: ['เหรียญ', 'โอลิมปิก', 'กีฬา', 'นักกีฬา', 'ประเทศ', 'ทอง', 'เงิน', 'ทองแดง', 'medal', 'olympic', 'sport', 'athlete', 'country'],
+        sales: ['ขาย', 'รายได้', 'ลูกค้า', 'สินค้า', 'การขาย', 'sale', 'revenue', 'customer', 'product'],
+        employee: ['พนักงาน', 'ลูกค้า', 'เงินเดือน', 'แผนก', 'employee', 'salary', 'department'],
+        order: ['สั่งซื้อ', 'คำสั่งซื้อ', 'ออเดอร์', 'order', 'purchase'],
+        user: ['ผู้ใช้', 'สมาชิก', 'user', 'member', 'account']
+    };
+    // Score each table based on keywords and table name
+    const tableScores = availableTables.map(table => {
+        let score = 0;
+        const tableName = table.name.toLowerCase();
+        const tableComment = (table.comment || '').toLowerCase();
+        // Check if query keywords match table name or comment
+        for (const [category, keywords] of Object.entries(tableKeywords)) {
+            const keywordMatches = keywords.filter(keyword => query.includes(keyword) && (tableName.includes(category) || tableComment.includes(keyword))).length;
+            score += keywordMatches * 10;
+        }
+        // Direct table name match
+        if (query.includes(tableName)) {
+            score += 50;
+        }
+        // Partial table name match
+        const tableWords = tableName.split('_');
+        tableWords.forEach((word) => {
+            if (query.includes(word)) {
+                score += 20;
+            }
+        });
+        return { table, score };
+    });
+    // Sort by score and return best match
+    tableScores.sort((a, b) => b.score - a.score);
+    // If no good match found, return first table or fallback
+    return tableScores[0]?.table || availableTables[0] || { name: 'olympic_medalists', comment: 'Fallback table' };
+}
+// Function to get sample data for AI learning (dynamic for any table)
+async function getSampleData(tableName, availableColumns, limit = 10) {
+    let connection;
+    try {
+        connection = await mysql.createConnection(dbConfig);
+        // Get sample records
+        const [sampleRows] = await connection.execute(`SELECT * FROM ${tableName} LIMIT ?`, [limit]);
+        // Dynamically get distinct values for categorical columns
+        const distinctValues = {};
+        // Filter categorical columns (text-based and groupable)
+        const categoricalColumns = availableColumns.filter(col => col.canBeGrouped && col.isText && !col.name.includes('id')).slice(0, 5); // Limit to 5 columns to avoid too many queries
+        // Get distinct values for each categorical column
+        for (const col of categoricalColumns) {
+            try {
+                const [distinctRows] = await connection.execute(`SELECT DISTINCT ${col.name} FROM ${tableName} WHERE ${col.name} IS NOT NULL LIMIT 5`);
+                distinctValues[col.name] = distinctRows.map(row => row[col.name]);
+            }
+            catch (error) {
+                console.warn(`Could not get distinct values for column ${col.name}:`, error);
+                distinctValues[col.name] = [];
+            }
+        }
+        return {
+            sampleRecords: sampleRows,
+            distinctValues,
+            categoricalColumns: categoricalColumns.map(col => col.name),
+            totalSampleCount: sampleRows.length
+        };
+    }
+    catch (error) {
+        console.error('Error getting sample data:', error);
+        return {
+            sampleRecords: [],
+            distinctValues: {
+                fallback: ['Sample1', 'Sample2', 'Sample3']
+            },
+            categoricalColumns: ['fallback'],
+            totalSampleCount: 0
+        };
+    }
+    finally {
+        if (connection) {
+            await connection.end();
+        }
+    }
+}
 // Function to generate SQL query using AI with dynamic rules
-async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumns, tableName = 'olympic_medalists') {
+async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumns, sampleData, tableName = 'olympic_medalists') {
     const analysisModel = new ChatGoogleGenerativeAI({
         model: 'gemini-1.5-flash',
         apiKey: process.env.GEMINI_API_KEY,
@@ -74,15 +183,24 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
   Columns ที่มีในตาราง ${tableName}:
   ${columnsInfo}
 
+  ตัวอย่างข้อมูลจริงในตาราง (${sampleData.totalSampleCount} รายการ):
+  ${sampleData.sampleRecords.slice(0, 3).map((record, index) => `Record ${index + 1}: ${Object.entries(record).map(([key, value]) => `${key}="${value}"`).join(', ')}`).join('\n  ')}
+
+  ค่า Distinct ในแต่ละ column สำคัญ:
+  ${Object.entries(sampleData.distinctValues).map(([columnName, values]) => `- ${columnName}: ${Array.isArray(values) ? values.slice(0, 5).join(', ') : 'N/A'}${Array.isArray(values) && values.length > 5 ? '...' : ''}`).join('\n  ')}
+
+  Categorical Columns ที่พร้อมใช้งาน: ${sampleData.categoricalColumns.join(', ')}
+
   รูปแบบ Query สำหรับ ${columnAnalysis.chart_type} chart:
   ${selectedPattern}
 
-  กฎการสร้าง SQL (Dynamic Rules):
+  กฎการสร้าง SQL (Dynamic Rules พร้อมตัวอย่างข้อมูลจริง):
   
   ## พื้นฐานการสร้าง Query:
   1. ใช้เฉพาะ columns ที่มีในตารางที่ระบุ
   2. วิเคราะห์ประเภทข้อมูลของแต่ละ column เพื่อเลือกการประมวลผลที่เหมาะสม
   3. ใช้ alias ที่เหมาะสมสำหรับ SELECT clause
+  4. อ้างอิงตัวอย่างข้อมูลจริงข้างต้นเพื่อเข้าใจรูปแบบข้อมูล
   
   ## รูปแบบ Query ตาม Chart Type:
   - **Categorical Charts (bar/column/pie)**: SELECT [category_column], COUNT(*) AS count FROM [table] GROUP BY [category_column]
@@ -90,10 +208,12 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
   - **Distribution Charts (histogram)**: SELECT [numeric_column], COUNT(*) AS frequency FROM [table] GROUP BY [numeric_column]
   - **Comparison Charts (scatter)**: SELECT [x_column], [y_column] FROM [table]
   
-  ## Dynamic WHERE Clause Construction:
+  ## Dynamic WHERE Clause Construction (ใช้ตัวอย่างข้อมูลจริง):
   - วิเคราะห์คำถามเพื่อหา filter conditions
-  - ใช้ column comments และ sample data เพื่อเข้าใจรูปแบบข้อมูล
-  - สร้าง condition ที่เหมาะสมกับ data type (string, number, date)
+  - ใช้ค่า distinct จากตัวอย่างข้อมูลเพื่อสร้าง condition ที่ถูกต้อง
+  - เช่น ถ้าหา "ไทย" ใช้ WHERE country = 'Thailand' หรือ country_code = 'THA'
+  - เช่น ถ้าหา "ทอง" ใช้ WHERE medal = 'Gold'
+  - เช่น ถ้าหาปี ใช้ WHERE year = 2024 หรือ year BETWEEN 2020 AND 2024
   - รองรับ multiple conditions ด้วย AND/OR
   
   ## Aggregation Strategy:
@@ -107,20 +227,19 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
   - **Time series**: ORDER BY time_column ASC
   - **LIMIT**: ปรับตาม chart type และข้อมูล (10-50 รายการ)
   
-  ## Error Handling:
-  - ตรวจสอบ column existence ก่อนสร้าง query
-  - ใช้ fallback query หาก parsing ล้มเหลว
-  - รองรับ multiple table joins หากจำเป็น
-
-  ตัวอย่างการสร้าง WHERE clause แบบ dynamic:
-  - ถ้าหาคำว่า "ไทย", "Thailand", "THA" → ใช้ columns ที่เกี่ยวกับประเทศ
-  - ถ้าหาตัวเลขปี → ใช้ columns ที่เป็น date/year
-  - ถ้าหาชื่อกีฬา → ใช้ columns ที่เกี่ยวกับ sport/event
-  - ถ้าหาประเภทเหรียญ → ใช้ columns ที่เกี่ยวกับ medal
+  ## ตัวอย่างการใช้ข้อมูลจริงในการสร้าง WHERE clause:
+  ${Object.entries(sampleData.distinctValues).map(([columnName, values]) => {
+        if (!Array.isArray(values) || values.length === 0)
+            return '';
+        const examples = values.slice(0, 2);
+        return `- ถ้าหา "${examples[0]}" → WHERE ${columnName} = '${examples[0]}'${examples[1] ? ` หรือ WHERE ${columnName} = '${examples[1]}'` : ''}`;
+    }).filter(Boolean).join('\n  ')}
+  - ถ้าหาช่วงปีหรือตัวเลข → WHERE column_name BETWEEN value1 AND value2
+  - ถ้าหาหลายเงื่อนไข → WHERE condition1 AND condition2
 
   วิเคราะห์คำถามอย่างละเอียดและสร้าง SQL ที่:
   1. ใช้ columns ที่เหมาะสมจาก analysis
-  2. สร้าง WHERE clause ที่ตรงกับความต้องการ
+  2. สร้าง WHERE clause ที่ตรงกับความต้องการและใช้ค่าจริงจากตัวอย่างข้อมูล
   3. เลือก aggregation ที่เหมาะสมกับข้อมูล
   4. กำหนด ORDER BY และ LIMIT ที่เหมาะสม
 
@@ -128,10 +247,11 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
   {
     "sql_query": "SELECT ... FROM ${tableName} WHERE ... GROUP BY ... ORDER BY ... LIMIT ...",
     "explanation": "คำอธิบายละเอียดว่าทำไมสร้าง query นี้ รวมถึงการเลือก columns, WHERE conditions, และ aggregation strategy",
-    "query_reasoning": "เหตุผลเชิงเทคนิคของการออกแบบ query นี้",
+    "query_reasoning": "เหตุผลเชิงเทคนิคของการออกแบบ query นี้ โดยอ้างอิงตัวอย่างข้อมูลจริง",
     "columns_used": ["column1", "column2"],
     "filters_applied": ["filter description"],
-    "chart_suitability": "อธิบายว่า query นี้เหมาะสมกับ chart type อย่างไร"
+    "chart_suitability": "อธิบายว่า query นี้เหมาะสมกับ chart type อย่างไร",
+    "sample_data_insights": "ข้อมูลเชิงลึกที่ได้จากการวิเคราะห์ตัวอย่างข้อมูล"
   }
   `;
     try {
@@ -148,6 +268,7 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
                 columnsUsed: parsed.columns_used || [],
                 filtersApplied: parsed.filters_applied || [],
                 chartSuitability: parsed.chart_suitability || '',
+                sampleDataInsights: parsed.sample_data_insights || '',
             };
         }
     }
@@ -170,6 +291,7 @@ async function generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumn
         columnsUsed: [primaryColumn],
         filtersApplied: ['ไม่มี filter'],
         chartSuitability: `เหมาะสำหรับ ${columnAnalysis.chart_type} chart พื้นฐาน`,
+        sampleDataInsights: 'ใช้ fallback query ไม่ได้วิเคราะห์จากตัวอย่างข้อมูล',
     };
 }
 // Function to execute SQL query
@@ -251,6 +373,36 @@ async function analyzeTableStructure(tableName) {
         }
     }
 }
+// Helper function to detect chart type from user query
+function detectChartTypeFromQuery(userQuery) {
+    const query = userQuery.toLowerCase();
+    const chartPatterns = {
+        bar: ['bar chart', 'กราฟแท่ง', 'แผนภูมิแท่ง', 'แท่ง', 'เปรียบเทียบ'],
+        column: ['column chart', 'กราฟคอลัมน์', 'แผนภูมิคอลัมน์', 'คอลัมน์'],
+        line: [
+            'line chart',
+            'กราฟเส้น',
+            'แผนภูมิเส้น',
+            'เส้น',
+            'การเปลี่ยนแปลง',
+            'ตลอดเวลา',
+            'ตามเวลา',
+        ],
+        pie: ['pie chart', 'กราฟวงกลม', 'แผนภูมิวงกลม', 'สัดส่วน', 'เปอร์เซ็นต์', 'pie'],
+        donut: ['donut chart', 'กราฟโดนัท', 'แผนภูมิโดนัท', 'donut'],
+        area: ['area chart', 'กราฟพื้นที่', 'แผนภูมิพื้นที่', 'สะสม'],
+        scatter: ['scatter plot', 'scatter chart', 'กราฟกระจาย', 'จุดกระจาย', 'ความสัมพันธ์'],
+        histogram: ['histogram', 'กราฟแจกแจง', 'การกระจาย', 'ฮิสโตแกรม'],
+    };
+    for (const [chartType, patterns] of Object.entries(chartPatterns)) {
+        for (const pattern of patterns) {
+            if (query.includes(pattern)) {
+                return chartType;
+            }
+        }
+    }
+    return null;
+}
 // Helper function to suggest chart types based on column properties
 function getSuggestedChartTypes(columnName, dataType, comment) {
     const suggestions = [];
@@ -283,19 +435,43 @@ function getSuggestedChartTypes(columnName, dataType, comment) {
     }
     return suggestions.length > 0 ? suggestions : ['bar', 'column'];
 }
-async function getAvailableColumns(tableName = 'olympic_medalists') {
+async function getAvailableColumns(tableName) {
     // ใช้ dynamic table analysis
     const dynamicColumns = await analyzeTableStructure(tableName);
     if (dynamicColumns.length > 0) {
         return dynamicColumns;
     }
-    // Fallback เมื่อไม่สามารถเชื่อมต่อ database
-    console.warn('Using fallback column definitions');
+    // Dynamic fallback based on common column patterns
+    console.warn(`Using dynamic fallback for table: ${tableName}`);
     return [
         {
-            name: 'season',
+            name: 'id',
+            type: 'int',
+            comment: 'Primary key identifier',
+            isNumeric: true,
+            isDate: false,
+            isText: false,
+            canBeGrouped: false,
+            canBeAggregated: false,
+            suitableForFilter: true,
+            suggestedChartTypes: ['scatter'],
+        },
+        {
+            name: 'name',
             type: 'varchar',
-            comment: 'ฤดูกาล (Summer/Winter)',
+            comment: 'Name field',
+            isNumeric: false,
+            isDate: false,
+            isText: true,
+            canBeGrouped: true,
+            canBeAggregated: false,
+            suitableForFilter: true,
+            suggestedChartTypes: ['bar', 'column', 'pie'],
+        },
+        {
+            name: 'category',
+            type: 'varchar',
+            comment: 'Category field',
             isNumeric: false,
             isDate: false,
             isText: true,
@@ -305,112 +481,28 @@ async function getAvailableColumns(tableName = 'olympic_medalists') {
             suggestedChartTypes: ['pie', 'donut', 'bar'],
         },
         {
-            name: 'year',
+            name: 'value',
             type: 'int',
-            comment: 'ปี',
+            comment: 'Numeric value field',
             isNumeric: true,
             isDate: false,
+            isText: false,
+            canBeGrouped: false,
+            canBeAggregated: true,
+            suitableForFilter: true,
+            suggestedChartTypes: ['histogram', 'scatter'],
+        },
+        {
+            name: 'created_at',
+            type: 'datetime',
+            comment: 'Creation timestamp',
+            isNumeric: false,
+            isDate: true,
             isText: false,
             canBeGrouped: true,
             canBeAggregated: false,
             suitableForFilter: true,
-            suggestedChartTypes: ['line', 'area', 'bar'],
-        },
-        {
-            name: 'medal',
-            type: 'varchar',
-            comment: 'ประเภทเหรียญ (Gold/Silver/Bronze)',
-            isNumeric: false,
-            isDate: false,
-            isText: true,
-            canBeGrouped: true,
-            canBeAggregated: false,
-            suitableForFilter: true,
-            suggestedChartTypes: ['pie', 'donut', 'bar'],
-        },
-        {
-            name: 'country_code',
-            type: 'varchar',
-            comment: 'รหัสประเทศ (THA, USA, etc.)',
-            isNumeric: false,
-            isDate: false,
-            isText: true,
-            canBeGrouped: true,
-            canBeAggregated: false,
-            suitableForFilter: true,
-            suggestedChartTypes: ['bar', 'column', 'pie'],
-        },
-        {
-            name: 'country',
-            type: 'varchar',
-            comment: 'ชื่อประเทศ',
-            isNumeric: false,
-            isDate: false,
-            isText: true,
-            canBeGrouped: true,
-            canBeAggregated: false,
-            suitableForFilter: true,
-            suggestedChartTypes: ['bar', 'column', 'pie'],
-        },
-        {
-            name: 'athletes',
-            type: 'varchar',
-            comment: 'ชื่อนักกีฬา',
-            isNumeric: false,
-            isDate: false,
-            isText: true,
-            canBeGrouped: false,
-            canBeAggregated: false,
-            suitableForFilter: true,
-            suggestedChartTypes: ['bar'],
-        },
-        {
-            name: 'games',
-            type: 'varchar',
-            comment: 'การแข่งขัน (2024 Paris, 2020 Tokyo, etc.)',
-            isNumeric: false,
-            isDate: false,
-            isText: true,
-            canBeGrouped: true,
-            canBeAggregated: false,
-            suitableForFilter: true,
-            suggestedChartTypes: ['bar', 'column'],
-        },
-        {
-            name: 'sport',
-            type: 'varchar',
-            comment: 'ประเภทกีฬา (Swimming, Athletics, etc.)',
-            isNumeric: false,
-            isDate: false,
-            isText: true,
-            canBeGrouped: true,
-            canBeAggregated: false,
-            suitableForFilter: true,
-            suggestedChartTypes: ['bar', 'column', 'pie'],
-        },
-        {
-            name: 'event_gender',
-            type: 'varchar',
-            comment: 'เพศ (Men, Women, Mixed)',
-            isNumeric: false,
-            isDate: false,
-            isText: true,
-            canBeGrouped: true,
-            canBeAggregated: false,
-            suitableForFilter: true,
-            suggestedChartTypes: ['pie', 'donut', 'bar'],
-        },
-        {
-            name: 'event_name',
-            type: 'varchar',
-            comment: 'ชื่อรายการแข่งขัน',
-            isNumeric: false,
-            isDate: false,
-            isText: true,
-            canBeGrouped: true,
-            canBeAggregated: false,
-            suitableForFilter: true,
-            suggestedChartTypes: ['bar', 'column'],
+            suggestedChartTypes: ['line', 'area'],
         },
     ];
 }
@@ -454,6 +546,7 @@ app.get('/', (c) => {
 - แสดงกีฬาที่ไทยได้เหรียญมากที่สุด (bar chart)">แสดงจำนวนเหรียญทองของประเทศไทย</textarea><br>
             <button id="sendBtn" onclick="sendQuery()">ส่งคำถาม (AI Analysis)</button>
             <button id="testBtn" onclick="testStream()">ทดสอบ SSE</button>
+            <button id="tablesBtn" onclick="loadTables()">ดู Tables</button>
             <button id="columnsBtn" onclick="loadColumns()">ดู Columns</button>
             <button id="testDbBtn" onclick="testDatabase()">ทดสอบ DB</button>
             <button id="clearBtn" onclick="clearOutput()">ล้างผลลัพธ์</button>
@@ -671,6 +764,31 @@ app.get('/', (c) => {
                 });
             }
             
+            function loadTables() {
+                const tablesBtn = document.getElementById('tablesBtn');
+                tablesBtn.disabled = true;
+                
+                fetch('/api/tables')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        addMessage('🗂️ Tables ที่มีในฐานข้อมูล:', 'result');
+                        data.tables.forEach((table, index) => {
+                            addMessage((index + 1) + '. ' + table.name + ': ' + (table.comment || 'ไม่มีคำอธิบาย'), 'result');
+                        });
+                        addMessage('รวม ' + data.total + ' tables', 'result');
+                    } else {
+                        addMessage('❌ ไม่สามารถโหลด tables ได้: ' + data.error, 'error');
+                    }
+                    tablesBtn.disabled = false;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    addMessage('เกิดข้อผิดพลาด: ' + error.message, 'error');
+                    tablesBtn.disabled = false;
+                });
+            }
+            
             function loadColumns() {
                 const columnsBtn = document.getElementById('columnsBtn');
                 columnsBtn.disabled = true;
@@ -679,11 +797,14 @@ app.get('/', (c) => {
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        addMessage('📋 Columns ที่มีในฐานข้อมูล:', 'result');
+                        addMessage('📋 Columns ในตาราง ' + data.table + ':', 'result');
                         data.columns.forEach((col, index) => {
                             addMessage((index + 1) + '. ' + col.name + ' (' + col.type + '): ' + (col.comment || 'ไม่มีคำอธิบาย'), 'result');
                         });
                         addMessage('รวม ' + data.total + ' columns', 'result');
+                        if (data.available_tables && data.available_tables.length > 0) {
+                            addMessage('📋 Tables อื่นๆ ที่มี: ' + data.available_tables.map(t => t.name).join(', '), 'result');
+                        }
                     } else {
                         addMessage('❌ ไม่สามารถโหลด columns ได้: ' + data.error, 'error');
                     }
@@ -770,14 +891,55 @@ app.get('/api/test-db', async (c) => {
         }, 500);
     }
 });
+// API สำหรับดู tables ที่มีอยู่
+app.get('/api/tables', async (c) => {
+    try {
+        const tables = await getAvailableTables();
+        return c.json({
+            success: true,
+            tables: tables,
+            total: tables.length,
+        });
+    }
+    catch (error) {
+        return c.json({
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+        }, 500);
+    }
+});
+// API สำหรับดู columns ของ table ที่ระบุ
+app.get('/api/columns/:tableName', async (c) => {
+    try {
+        const tableName = c.req.param('tableName');
+        const columns = await getAvailableColumns(tableName);
+        return c.json({
+            success: true,
+            table: tableName,
+            columns: columns,
+            total: columns.length,
+        });
+    }
+    catch (error) {
+        return c.json({
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+        }, 500);
+    }
+});
 // API สำหรับดู columns ที่มีอยู่
 app.get('/api/columns', async (c) => {
     try {
-        const columns = await getAvailableColumns();
+        // Get tables first, then use first available table or default
+        const tables = await getAvailableTables();
+        const tableName = tables.length > 0 ? tables[0].name : 'information_schema.tables';
+        const columns = await getAvailableColumns(tableName);
         return c.json({
             success: true,
+            table: tableName,
             columns: columns,
             total: columns.length,
+            available_tables: tables,
         });
     }
     catch (error) {
@@ -810,16 +972,26 @@ app.post('/api/query-stream', async (c) => {
                 }),
                 event: 'update',
             });
+            // โหลด tables และ columns แบบ dynamic จาก database
             await stream.writeSSE({
                 data: JSON.stringify({
                     type: 'status',
-                    message: 'กำลังโหลดข้อมูล columns จากฐานข้อมูล...',
+                    message: 'กำลังตรวจสอบ tables ที่มีอยู่ในฐานข้อมูล...',
                     progress: 55,
                 }),
                 event: 'update',
             });
-            // โหลด columns แบบ dynamic จาก database
-            const tableName = 'olympic_medalists'; // สามารถทำให้ dynamic ได้ในอนาคต
+            const availableTables = await getAvailableTables();
+            const bestTable = await detectBestTable(userQuery, availableTables);
+            const tableName = bestTable.name;
+            await stream.writeSSE({
+                data: JSON.stringify({
+                    type: 'status',
+                    message: `เลือกใช้ตาราง: ${tableName} (${bestTable.comment})`,
+                    progress: 58,
+                }),
+                event: 'update',
+            });
             const availableColumns = await getAvailableColumns(tableName);
             const databaseStatus = availableColumns.length > 0 && availableColumns[0].comment !== 'ไม่มีคำอธิบาย'
                 ? 'เชื่อมต่อฐานข้อมูลสำเร็จ'
@@ -827,7 +999,7 @@ app.post('/api/query-stream', async (c) => {
             await stream.writeSSE({
                 data: JSON.stringify({
                     type: 'status',
-                    message: `${databaseStatus} - พบ ${availableColumns.length} columns`,
+                    message: `${databaseStatus} - ตาราง: ${tableName}, columns: ${availableColumns.length}`,
                     progress: 60,
                 }),
                 event: 'update',
@@ -861,7 +1033,50 @@ app.post('/api/query-stream', async (c) => {
                 .filter((col) => col.canBeGrouped && !col.isDate)
                 .map((col) => col.name)
                 .join(', ');
-            const columnAnalysisPrompt = `
+            // ตรวจสอบว่าผู้ใช้ระบุประเภท chart มาแล้วหรือไม่
+            const detectedChartType = detectChartTypeFromQuery(userQuery);
+            let columnAnalysis;
+            if (detectedChartType) {
+                // ถ้าผู้ใช้ระบุ chart type มาแล้ว ข้าม AI analysis
+                await stream.writeSSE({
+                    data: JSON.stringify({
+                        type: 'status',
+                        message: `ตรวจพบประเภทกราฟ: ${detectedChartType} - ข้าม AI analysis`,
+                        progress: 70,
+                    }),
+                    event: 'update',
+                });
+                // สร้าง columnAnalysis แบบ simplified
+                const relevantColumns = availableColumns.filter((col) => col.canBeGrouped).slice(0, 2);
+                const primaryColumn = relevantColumns.length > 0 ? relevantColumns[0].name : 'country';
+                columnAnalysis = {
+                    required_columns: relevantColumns.map((col) => col.name),
+                    chart_type: detectedChartType,
+                    alternative_charts: availableColumns
+                        .filter((col) => col.suggestedChartTypes.includes(detectedChartType))
+                        .flatMap((col) => col.suggestedChartTypes)
+                        .filter((type) => type !== detectedChartType)
+                        .slice(0, 2),
+                    analysis: `ใช้ประเภทกราฟที่ผู้ใช้ระบุ: ${detectedChartType}`,
+                    chart_reasoning: `ผู้ใช้ระบุประเภทกราฟ ${detectedChartType} ในคำถาม จึงข้าม AI analysis`,
+                    data_aggregation: 'count',
+                    x_axis: primaryColumn,
+                    y_axis: 'count',
+                    suggested_filters: [],
+                    column_reasoning: `เลือก columns ที่ groupable ได้สำหรับ ${detectedChartType} chart`,
+                };
+                await stream.writeSSE({
+                    data: JSON.stringify({
+                        type: 'status',
+                        message: `ใช้ ${detectedChartType} chart กับ columns ${columnAnalysis.required_columns.join(', ')}`,
+                        progress: 75,
+                    }),
+                    event: 'update',
+                });
+            }
+            else {
+                // วิเคราะห์ด้วย AI เหมือนเดิม
+                const columnAnalysisPrompt = `
       วิเคราะห์คำถามต่อไปนี้และระบุว่าต้องใช้ column ไหนจากข้อมูลและเลือก chart type ที่เหมาะสมที่สุด:
       
       คำถาม: "${userQuery}"
@@ -904,61 +1119,79 @@ app.post('/api/query-stream', async (c) => {
         "column_reasoning": "เหตุผลในการเลือก columns เฉพาะนี้จาก capabilities"
       }
       `;
-            // สร้าง AI model สำหรับวิเคราะห์
-            const analysisModel = new ChatGoogleGenerativeAI({
-                model: 'gemini-1.5-flash',
-                apiKey: process.env.GEMINI_API_KEY,
-                temperature: 0.1,
-            });
+                // สร้าง AI model สำหรับวิเคราะห์
+                const analysisModel = new ChatGoogleGenerativeAI({
+                    model: 'gemini-1.5-flash',
+                    apiKey: process.env.GEMINI_API_KEY,
+                    temperature: 0.1,
+                });
+                await stream.writeSSE({
+                    data: JSON.stringify({
+                        type: 'status',
+                        message: 'กำลังวิเคราะห์คำถามด้วย AI...',
+                        progress: 65,
+                    }),
+                    event: 'update',
+                });
+                const analysisResult = await analysisModel.invoke(columnAnalysisPrompt);
+                try {
+                    // แปลง content เป็น string และหา JSON
+                    const contentString = typeof analysisResult.content === 'string'
+                        ? analysisResult.content
+                        : JSON.stringify(analysisResult.content);
+                    const jsonMatch = contentString.match(/\{[\s\S]*\}/);
+                    if (jsonMatch) {
+                        columnAnalysis = JSON.parse(jsonMatch[0]);
+                    }
+                    else {
+                        throw new Error('ไม่พบ JSON ในการตอบ');
+                    }
+                }
+                catch (parseError) {
+                    console.error('Error parsing AI response:', parseError);
+                    // ใช้ค่า default หากไม่สามารถ parse ได้ - เลือกจาก column capabilities
+                    const defaultGroupableColumns = availableColumns
+                        .filter((col) => col.canBeGrouped)
+                        .slice(0, 2)
+                        .map((col) => col.name);
+                    const defaultXAxis = availableColumns.filter((col) => col.canBeGrouped)[0]?.name || 'country';
+                    columnAnalysis = {
+                        required_columns: defaultGroupableColumns.length > 0 ? defaultGroupableColumns : ['country', 'medal'],
+                        chart_type: 'bar',
+                        alternative_charts: ['column', 'pie'],
+                        analysis: 'ไม่สามารถวิเคราะห์ได้ ใช้ค่าเริ่มต้นจาก column capabilities',
+                        chart_reasoning: 'ใช้กราฟแท่งเปรียบเทียบข้อมูลพื้นฐาน โดยเลือก columns ที่ groupable ได้',
+                        data_aggregation: 'count',
+                        x_axis: defaultXAxis,
+                        y_axis: 'count',
+                        suggested_filters: [],
+                        column_reasoning: 'เลือกจาก columns ที่มี canBeGrouped = true',
+                    };
+                }
+                await stream.writeSSE({
+                    data: JSON.stringify({
+                        type: 'status',
+                        message: `ผลการวิเคราะห์: ใช้ ${columnAnalysis.chart_type} chart กับ columns ${columnAnalysis.required_columns.join(', ')}`,
+                        progress: 75,
+                    }),
+                    event: 'update',
+                });
+            }
+            // ดึงข้อมูลตัวอย่างสำหรับ AI เรียนรู้
             await stream.writeSSE({
                 data: JSON.stringify({
                     type: 'status',
-                    message: 'กำลังวิเคราะห์คำถามด้วย AI...',
-                    progress: 65,
+                    message: 'กำลังดึงข้อมูลตัวอย่างสำหรับ AI เรียนรู้...',
+                    progress: 76,
                 }),
                 event: 'update',
             });
-            const analysisResult = await analysisModel.invoke(columnAnalysisPrompt);
-            let columnAnalysis;
-            try {
-                // แปลง content เป็น string และหา JSON
-                const contentString = typeof analysisResult.content === 'string'
-                    ? analysisResult.content
-                    : JSON.stringify(analysisResult.content);
-                const jsonMatch = contentString.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    columnAnalysis = JSON.parse(jsonMatch[0]);
-                }
-                else {
-                    throw new Error('ไม่พบ JSON ในการตอบ');
-                }
-            }
-            catch (parseError) {
-                console.error('Error parsing AI response:', parseError);
-                // ใช้ค่า default หากไม่สามารถ parse ได้ - เลือกจาก column capabilities
-                const defaultGroupableColumns = availableColumns
-                    .filter((col) => col.canBeGrouped)
-                    .slice(0, 2)
-                    .map((col) => col.name);
-                const defaultXAxis = availableColumns.filter((col) => col.canBeGrouped)[0]?.name || 'country';
-                columnAnalysis = {
-                    required_columns: defaultGroupableColumns.length > 0 ? defaultGroupableColumns : ['country', 'medal'],
-                    chart_type: 'bar',
-                    alternative_charts: ['column', 'pie'],
-                    analysis: 'ไม่สามารถวิเคราะห์ได้ ใช้ค่าเริ่มต้นจาก column capabilities',
-                    chart_reasoning: 'ใช้กราฟแท่งเปรียบเทียบข้อมูลพื้นฐาน โดยเลือก columns ที่ groupable ได้',
-                    data_aggregation: 'count',
-                    x_axis: defaultXAxis,
-                    y_axis: 'count',
-                    suggested_filters: [],
-                    column_reasoning: 'เลือกจาก columns ที่มี canBeGrouped = true',
-                };
-            }
+            const sampleData = await getSampleData(tableName, availableColumns, 10);
             await stream.writeSSE({
                 data: JSON.stringify({
                     type: 'status',
-                    message: `ผลการวิเคราะห์: ใช้ ${columnAnalysis.chart_type} chart กับ columns ${columnAnalysis.required_columns.join(', ')}`,
-                    progress: 75,
+                    message: `ได้ข้อมูลตัวอย่าง ${sampleData.totalSampleCount} รายการ สำหรับ AI วิเคราะห์`,
+                    progress: 78,
                 }),
                 event: 'update',
             });
@@ -966,13 +1199,13 @@ app.post('/api/query-stream', async (c) => {
             await stream.writeSSE({
                 data: JSON.stringify({
                     type: 'status',
-                    message: 'กำลังให้ AI สร้าง SQL query...',
+                    message: 'กำลังให้ AI สร้าง SQL query พร้อมตัวอย่างข้อมูล...',
                     progress: 80,
                 }),
                 event: 'update',
             });
-            const result = await generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumns, 'olympic_medalists');
-            const { sqlQuery, explanation, queryReasoning, columnsUsed, filtersApplied, chartSuitability, } = result;
+            const result = await generateSQLQueryWithAI(columnAnalysis, userQuery, availableColumns, sampleData, tableName);
+            const { sqlQuery, explanation, queryReasoning, columnsUsed, filtersApplied, chartSuitability, sampleDataInsights, } = result;
             await stream.writeSSE({
                 data: JSON.stringify({
                     type: 'status',
